@@ -1,0 +1,65 @@
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700;800&family=VT323&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  --font-pixel: "VT323", monospace;
+  --color-monster: #82ff00;
+  --color-monster-dark: #4b9e00;
+  --color-ps-gray: #1b1b1b;
+  --color-ps-panel: #2a2a2a;
+}
+
+body {
+  background-color: var(--color-ps-gray);
+  color: white;
+}
+
+.markdown-body h2 {
+  font-family: var(--font-pixel);
+  font-size: 2.2rem;
+  color: var(--color-monster);
+  text-transform: uppercase;
+  margin-top: 2rem;
+  margin-bottom: 1rem;
+  border-bottom: 2px solid var(--color-monster-dark);
+  padding-bottom: 0.25rem;
+}
+
+.markdown-body h3 {
+  font-family: var(--font-pixel);
+  font-size: 1.6rem;
+  color: white;
+  text-transform: uppercase;
+  margin-top: 1.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.markdown-body p, .markdown-body ul, .markdown-body li {
+  font-family: var(--font-mono);
+  font-size: 0.95rem;
+  line-height: 1.6;
+  color: #cccccc;
+  margin-bottom: 1rem;
+}
+
+.markdown-body ul {
+  list-style-type: square;
+  padding-left: 1.5rem;
+}
+
+.markdown-body li {
+  margin-bottom: 0.35rem;
+}
+
+.markdown-body strong {
+  color: white;
+  font-weight: 700;
+}
+
+.markdown-body code {
+  background-color: #333;
+  color: var(--color-monster);
+  padding: 0.1rem 0.3rem;
+  border-radius: 4px;
+}
