@@ -2,10 +2,10 @@ import { useEffect, useMemo, useRef, useState, type PointerEvent } from 'react';
 import { useGameStore } from '../../store';
 import { socket } from '../../lib/socket';
 import {
-  requestMobileThrow,
   setMobileJump,
   setMobileLookDelta,
   setMobileMove,
+  setMobileThrowHeld,
 } from '../../lib/mobileControls';
 
 const STICK_RADIUS = 54;
@@ -108,7 +108,10 @@ function MobileControls() {
         </button>
         <button
           className="h-20 w-20 rounded-full border border-monster/60 bg-monster font-pixel text-2xl uppercase text-black shadow-[0_0_22px_rgba(130,255,0,0.35)] active:bg-monster-dark"
-          onPointerDown={() => requestMobileThrow()}
+          onPointerDown={() => setMobileThrowHeld(true)}
+          onPointerUp={() => setMobileThrowHeld(false)}
+          onPointerCancel={() => setMobileThrowHeld(false)}
+          onPointerLeave={() => setMobileThrowHeld(false)}
         >
           Toss
         </button>
@@ -121,6 +124,7 @@ export function HUD() {
   const status = useGameStore((state) => state.status);
   const playersInfo = useGameStore((state) => state.playersInfo);
   const cans = useGameStore((state) => state.cans);
+  const throwCharge = useGameStore((state) => state.throwCharge);
   const wager = useGameStore((state) => state.wager);
   const [showScoreboard, setShowScoreboard] = useState(false);
 
@@ -236,13 +240,19 @@ export function HUD() {
       <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2">
         <div className="w-1.5 h-1.5 bg-monster rounded-full opacity-80 shadow-[0_0_5px_#82ff00]" />
         <div className="absolute top-1/2 left-1/2 w-8 h-8 border-2 border-monster/30 rounded-full -translate-x-1/2 -translate-y-1/2 pointer-events-none" />
+        <div className={`absolute left-1/2 top-8 h-1.5 w-28 -translate-x-1/2 overflow-hidden rounded-full border border-white/20 bg-black/55 transition-opacity ${throwCharge > 0 ? 'opacity-100' : 'opacity-0'}`}>
+          <div
+            className="h-full bg-monster shadow-[0_0_10px_rgba(130,255,0,0.85)]"
+            style={{ width: `${Math.round(throwCharge * 100)}%` }}
+          />
+        </div>
       </div>
 
       <MobileControls />
 
       <div className="p-4 sm:p-6 text-center">
         <div className="mx-auto hidden rounded border border-white/10 bg-black/45 px-4 py-2 font-mono text-[11px] uppercase tracking-[0.16em] text-white/55 backdrop-blur-sm md:inline-flex">
-          WASD MOVE / SPACE JUMP / CLICK THROW / TAB BOARD / ESC EXIT
+          WASD MOVE / SPACE JUMP / HOLD CLICK THROW / TAB BOARD / ESC EXIT
         </div>
       </div>
     </div>

@@ -4,7 +4,7 @@ interface MobileControlsState {
   lookX: number;
   lookY: number;
   jump: boolean;
-  throwRequestId: number;
+  throwHeld: boolean;
 }
 
 const state: MobileControlsState = {
@@ -13,7 +13,7 @@ const state: MobileControlsState = {
   lookX: 0,
   lookY: 0,
   jump: false,
-  throwRequestId: 0,
+  throwHeld: false,
 };
 
 export function setMobileMove(x: number, y: number) {
@@ -30,8 +30,8 @@ export function setMobileJump(active: boolean) {
   state.jump = active;
 }
 
-export function requestMobileThrow() {
-  state.throwRequestId += 1;
+export function setMobileThrowHeld(active: boolean) {
+  state.throwHeld = active;
 }
 
 export function readMobileControls() {

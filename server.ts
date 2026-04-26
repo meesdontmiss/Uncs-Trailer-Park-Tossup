@@ -5,10 +5,11 @@ import { randomUUID } from 'crypto';
 import { Server } from 'socket.io';
 import { arenaColliders, arenaSpawnPoints } from './src/arena';
 import {
-  CAN_DAMAGE,
   GRAVITY_Y,
   HOUSE_FEE_RATE,
+  MAX_CAN_DAMAGE,
   MAX_HEALTH,
+  MIN_CAN_DAMAGE,
   PLAYER_HIT_RADIUS,
   PROJECTILE_TTL_MS,
   SHOOT_COOLDOWN_MS,
@@ -160,6 +161,7 @@ function snapshotProjectile(projectile: ServerProjectile): ProjectileSnapshot {
     ownerId: projectile.ownerId,
     spawnPos: projectile.spawnPos,
     velocity: projectile.velocity,
+    chargePower: projectile.chargePower,
     spawnedAt: projectile.spawnedAt,
   };
 }
@@ -360,7 +362,7 @@ function maybeFinishLastStanding(io: Server) {
   return true;
 }
 
-function handleValidHit(io: Server, ownerId: string, targetId: string, impactPosition: Vec3) {
+function handleValidHit(io: Server, ownerId: string, targetId: string, impactPosition: Vec3, chargePower: number) {
   const owner = players[ownerId];
   const target = players[targetId];
 
@@ -368,7 +370,9 @@ function handleValidHit(io: Server, ownerId: string, targetId: string, impactPos
     return;
   }
 
-  target.health = Math.max(0, target.health - CAN_DAMAGE);
+  const clampedCharge = Math.max(0, Math.min(1, chargePower));
+  const damage = Math.round(MIN_CAN_DAMAGE + ((MAX_CAN_DAMAGE - MIN_CAN_DAMAGE) * clampedCharge));
+  target.health = Math.max(0, target.health - damage);
   io.emit('impactCreated', {
     id: randomUUID(),
     position: impactPosition,
@@ -447,7 +451,7 @@ function resolveProjectile(io: Server, projectile: ServerProjectile, impact: { p
   despawnProjectile(io, projectile.id);
 
   if (impact.targetId) {
-    handleValidHit(io, projectile.ownerId, impact.targetId, impact.position);
+    handleValidHit(io, projectile.ownerId, impact.targetId, impact.position, projectile.chargePower);
     return;
   }
 
@@ -606,6 +610,7 @@ async function startServer() {
         ownerId: socket.id,
         spawnPos: data.spawnPos,
         velocity: data.velocity,
+        chargePower: Math.max(0, Math.min(1, data.chargePower ?? 0)),
         spawnedAt: now,
         resolved: false,
         lastSimulatedAt: now,

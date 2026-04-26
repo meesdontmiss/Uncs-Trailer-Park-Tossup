@@ -9,6 +9,7 @@ interface GameState {
   wager: string;
   cans: Can[];
   impacts: Impact[];
+  throwCharge: number;
   playersInfo: Record<string, PlayerSnapshot>;
   lobbyRooms: LobbyRoomSnapshot[];
   matchResult: MatchResult | null;
@@ -18,6 +19,7 @@ interface GameState {
   removeCan: (id: string) => void;
   addImpact: (impact: Impact) => void;
   removeImpact: (id: string) => void;
+  setThrowCharge: (charge: number) => void;
   setPlayersInfo: (info: Record<string, PlayerSnapshot>) => void;
   setLobbyRooms: (rooms: LobbyRoomSnapshot[]) => void;
   setMatchResult: (result: MatchResult) => void;
@@ -30,6 +32,7 @@ export const useGameStore = create<GameState>((set) => ({
   wager: 'FREE',
   cans: [],
   impacts: [],
+  throwCharge: 0,
   playersInfo: {},
   lobbyRooms: [],
   matchResult: null,
@@ -39,6 +42,7 @@ export const useGameStore = create<GameState>((set) => ({
     status: 'PLAYING',
     cans: [],
     impacts: [],
+    throwCharge: 0,
     playersInfo: {},
     matchResult: null,
   }),
@@ -54,6 +58,7 @@ export const useGameStore = create<GameState>((set) => ({
   removeImpact: (id) => set((state) => ({
     impacts: state.impacts.filter(i => i.id !== id)
   })),
+  setThrowCharge: (charge) => set({ throwCharge: Math.max(0, Math.min(1, charge)) }),
   setPlayersInfo: (info) => set({ playersInfo: info }),
   setLobbyRooms: (rooms) => set({ lobbyRooms: rooms }),
   setMatchResult: (result) => set({ matchResult: result, status: 'RESULT' }),
@@ -61,11 +66,13 @@ export const useGameStore = create<GameState>((set) => ({
     status: 'RESULT',
     matchResult: result ?? null,
     cans: [],
+    throwCharge: 0,
   }),
   reset: () => set({
     status: 'LOBBY',
     cans: [],
     impacts: [],
+    throwCharge: 0,
     playersInfo: {},
     matchResult: null,
   }),

@@ -14,7 +14,7 @@ import {
   type PlayerSnapshot,
   type ProjectileSnapshot,
 } from '../../gameTypes';
-import { playCanImpactSound, playDeathBassSound, playKillSound } from '../../lib/audio';
+import { playCanImpactSound, playDeathBassSound, playKillSound, startGameAmbience, stopGameAmbience } from '../../lib/audio';
 import { ensureSocketConnected, socket } from '../../lib/socket';
 
 interface NetworkPlayerState extends PlayerSnapshot {
@@ -46,6 +46,13 @@ export function GameWorld() {
   const setPlayersInfo = useGameStore((state) => state.setPlayersInfo);
   const setMatchResult = useGameStore((state) => state.setMatchResult);
   const [networkPlayers, setNetworkPlayers] = useState<Record<string, NetworkPlayerState>>({});
+
+  useEffect(() => {
+    startGameAmbience();
+    return () => {
+      stopGameAmbience();
+    };
+  }, []);
 
   useEffect(() => {
     const applySnapshot = (players: Record<string, PlayerSnapshot>) => {
@@ -292,6 +299,7 @@ export function GameWorld() {
                 position={can.spawnPos}
                 spawnedAt={can.spawnedAt}
                 velocity={can.velocity}
+                chargePower={can.chargePower}
               />
             ))}
 

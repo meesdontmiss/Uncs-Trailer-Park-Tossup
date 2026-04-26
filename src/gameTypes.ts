@@ -1,5 +1,7 @@
 export const MAX_HEALTH = 100;
 export const CAN_DAMAGE = 34;
+export const MIN_CAN_DAMAGE = 26;
+export const MAX_CAN_DAMAGE = 44;
 export const KILLS_TO_WIN = 5;
 export const HOUSE_FEE_RATE = 0.02;
 export const GRAVITY_Y = -20;
@@ -40,6 +42,7 @@ export interface ProjectileSnapshot {
   ownerId: string;
   spawnPos: Vec3;
   velocity: Vec3;
+  chargePower: number;
   spawnedAt: number;
 }
 

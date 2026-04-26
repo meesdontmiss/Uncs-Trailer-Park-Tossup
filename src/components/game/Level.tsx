@@ -299,35 +299,64 @@ function TreeBillboard({ texture, position, scale }: { texture: THREE.Texture; p
   );
 }
 
-function LawnChair2D({ position, rotationY, color }: { position: [number, number, number]; rotationY: number; color: string }) {
+function LawnChair3D({ position, rotationY, color }: { position: [number, number, number]; rotationY: number; color: string }) {
+  const frameColor = '#d8d0bd';
+  const shadowColor = new THREE.Color(color).offsetHSL(0, -0.1, -0.16).getStyle();
+
   return (
     <group position={position} rotation={[0, rotationY, 0]}>
-      <mesh castShadow receiveShadow position={[0, 0.45, 0]} rotation={[-0.35, 0, 0]}>
-        <boxGeometry args={[1.8, 0.12, 1.4]} />
-        <meshStandardMaterial color={color} roughness={0.8} />
+      <mesh castShadow receiveShadow position={[0, 0.44, 0.16]} rotation={[-0.18, 0, 0]}>
+        <boxGeometry args={[1.9, 0.08, 1.25]} />
+        <meshStandardMaterial color={color} roughness={0.9} />
       </mesh>
-      <mesh castShadow receiveShadow position={[0, 1.18, -0.7]} rotation={[0.55, 0, 0]}>
-        <boxGeometry args={[1.8, 0.12, 1.6]} />
-        <meshStandardMaterial color={color} roughness={0.8} />
+      <mesh castShadow receiveShadow position={[0, 1.14, -0.55]} rotation={[0.48, 0, 0]}>
+        <boxGeometry args={[1.9, 0.08, 1.5]} />
+        <meshStandardMaterial color={color} roughness={0.88} />
       </mesh>
-      {[-0.72, 0.72].map((x) => (
-        <mesh key={x} castShadow receiveShadow position={[x, 0.62, 0.05]}>
-          <boxGeometry args={[0.12, 1.1, 0.12]} />
-          <meshStandardMaterial color="#d8d0bd" roughness={0.65} metalness={0.1} />
+      {[-0.52, 0, 0.52].map((x) => (
+        <mesh key={`strap-seat-${x}`} castShadow receiveShadow position={[x, 0.5, 0.17]} rotation={[-0.18, 0, 0]}>
+          <boxGeometry args={[0.08, 0.1, 1.32]} />
+          <meshStandardMaterial color={shadowColor} roughness={0.95} />
+        </mesh>
+      ))}
+      {[-0.48, 0.48].map((x) => (
+        <mesh key={`strap-back-${x}`} castShadow receiveShadow position={[x, 1.18, -0.56]} rotation={[0.48, 0, 0]}>
+          <boxGeometry args={[0.1, 0.1, 1.55]} />
+          <meshStandardMaterial color={shadowColor} roughness={0.95} />
+        </mesh>
+      ))}
+      {[
+        [-0.86, 0.54, 0.65, -0.22],
+        [0.86, 0.54, 0.65, 0.22],
+        [-0.86, 0.86, -0.74, 0.16],
+        [0.86, 0.86, -0.74, -0.16],
+      ].map(([x, y, z, tilt], index) => (
+        <mesh key={`leg-${index}`} castShadow receiveShadow position={[x, y, z]} rotation={[tilt, 0, 0]}>
+          <cylinderGeometry args={[0.045, 0.045, 1.25, 10]} />
+          <meshStandardMaterial color={frameColor} roughness={0.55} metalness={0.35} />
+        </mesh>
+      ))}
+      {[
+        [0, 0.86, 0.78, Math.PI / 2],
+        [0, 1.56, -1.02, Math.PI / 2],
+        [-0.96, 1, -0.08, 0],
+        [0.96, 1, -0.08, 0],
+      ].map(([x, y, z, rz], index) => (
+        <mesh key={`rail-${index}`} castShadow receiveShadow position={[x, y, z]} rotation={[0, 0, rz]}>
+          <cylinderGeometry args={[0.04, 0.04, 1.95, 10]} />
+          <meshStandardMaterial color={frameColor} roughness={0.55} metalness={0.35} />
         </mesh>
       ))}
     </group>
   );
 }
 
-function ChickenBillboard({
-  texture,
+function Chicken3D({
   origin,
   radius,
   speed,
   phase,
 }: {
-  texture: THREE.Texture;
   origin: [number, number, number];
   radius: number;
   speed: number;
@@ -341,27 +370,61 @@ function ChickenBillboard({
     }
 
     const t = (clock.elapsedTime * speed) + phase;
+    const x = origin[0] + Math.cos(t) * radius;
+    const z = origin[2] + Math.sin(t * 0.7) * radius;
+    const nextX = origin[0] + Math.cos(t + 0.02) * radius;
+    const nextZ = origin[2] + Math.sin((t + 0.02) * 0.7) * radius;
+
     group.current.position.set(
-      origin[0] + Math.cos(t) * radius,
-      origin[1] + Math.abs(Math.sin(t * 4)) * 0.08,
-      origin[2] + Math.sin(t * 0.7) * radius,
+      x,
+      origin[1] + Math.abs(Math.sin(t * 7)) * 0.08,
+      z,
     );
+    group.current.rotation.y = Math.atan2(nextX - x, nextZ - z);
   });
 
   return (
     <group ref={group} position={origin}>
-      <Billboard follow lockX lockZ>
-        <mesh castShadow>
-          <planeGeometry args={[2.4, 2.4]} />
-          <meshStandardMaterial
-            map={texture}
-            transparent
-            alphaTest={0.08}
-            side={THREE.DoubleSide}
-            roughness={0.9}
-          />
-        </mesh>
-      </Billboard>
+      <mesh castShadow position={[0, 0.34, 0]} scale={[0.62, 0.42, 0.45]}>
+        <sphereGeometry args={[1, 18, 12]} />
+        <meshStandardMaterial color="#ead7aa" roughness={0.86} />
+      </mesh>
+      <mesh castShadow position={[0, 0.62, 0.45]} scale={[0.34, 0.32, 0.32]}>
+        <sphereGeometry args={[1, 16, 10]} />
+        <meshStandardMaterial color="#f0dfbd" roughness={0.86} />
+      </mesh>
+      <mesh castShadow position={[0, 0.95, 0.42]} rotation={[0.2, 0, 0]} scale={[0.17, 0.1, 0.14]}>
+        <sphereGeometry args={[1, 12, 8]} />
+        <meshStandardMaterial color="#c73523" roughness={0.72} />
+      </mesh>
+      <mesh castShadow position={[0, 0.61, 0.82]} rotation={[Math.PI / 2, 0, 0]}>
+        <coneGeometry args={[0.12, 0.28, 4]} />
+        <meshStandardMaterial color="#e89925" roughness={0.68} />
+      </mesh>
+      <mesh position={[-0.1, 0.67, 0.75]}>
+        <sphereGeometry args={[0.035, 8, 6]} />
+        <meshStandardMaterial color="#11100d" roughness={0.4} />
+      </mesh>
+      <mesh position={[0.1, 0.67, 0.75]}>
+        <sphereGeometry args={[0.035, 8, 6]} />
+        <meshStandardMaterial color="#11100d" roughness={0.4} />
+      </mesh>
+      <mesh castShadow position={[0, 0.34, -0.48]} rotation={[-0.45, 0, 0]} scale={[0.38, 0.18, 0.26]}>
+        <sphereGeometry args={[1, 14, 8]} />
+        <meshStandardMaterial color="#d6be8d" roughness={0.9} />
+      </mesh>
+      {[-0.16, 0.16].map((x) => (
+        <group key={`leg-${x}`} position={[x, 0.09, 0.08]}>
+          <mesh castShadow rotation={[0.12, 0, 0]}>
+            <cylinderGeometry args={[0.025, 0.025, 0.32, 6]} />
+            <meshStandardMaterial color="#de8d20" roughness={0.75} />
+          </mesh>
+          <mesh castShadow position={[0, -0.17, 0.08]} rotation={[Math.PI / 2, 0, 0]}>
+            <cylinderGeometry args={[0.018, 0.018, 0.2, 6]} />
+            <meshStandardMaterial color="#de8d20" roughness={0.75} />
+          </mesh>
+        </group>
+      ))}
     </group>
   );
 }
@@ -372,7 +435,6 @@ function ChickenBillboard({
 
 export function Level() {
   const treeTexture = useMemo(() => makeBillboardTexture('tree'), []);
-  const chickenTexture = useMemo(() => makeBillboardTexture('chicken'), []);
   const props = useTexture({
     grass: assets.terrain.grass,
     dirt: assets.terrain.dirt,
@@ -434,7 +496,7 @@ export function Level() {
       ))}
 
       {chairPlacements.map((chair, index) => (
-        <LawnChair2D
+        <LawnChair3D
           key={`chair-${index}`}
           position={chair.position}
           rotationY={chair.rotationY}
@@ -443,9 +505,8 @@ export function Level() {
       ))}
 
       {chickenPlacements.map((chicken, index) => (
-        <ChickenBillboard
+        <Chicken3D
           key={`chicken-${index}`}
-          texture={chickenTexture}
           origin={chicken.origin}
           radius={chicken.radius}
           speed={chicken.speed}

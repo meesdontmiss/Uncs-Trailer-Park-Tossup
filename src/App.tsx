@@ -14,6 +14,7 @@ import {
   Wallet,
 } from 'lucide-react';
 import { HOUSE_FEE_RATE } from './gameTypes';
+import { startLobbyMusic, stopGameAmbience, stopLobbyMusic } from './lib/audio';
 import { disconnectSocket, ensureSocketConnected, socket } from './lib/socket';
 import { useGameStore } from './store';
 
@@ -773,6 +774,8 @@ export default function App() {
   }, [endGame]);
 
   const handleStartGame = () => {
+    stopLobbyMusic();
+    stopGameAmbience();
     ensureSocketConnected();
     startTransition(() => {
       startGame();
@@ -781,6 +784,16 @@ export default function App() {
     setTimeout(() => {
       document.body.requestPointerLock?.();
     }, 100);
+  };
+
+  const handleEnterLobby = () => {
+    startLobbyMusic();
+    setMenuView('LOBBY');
+  };
+
+  const handleBackToStart = () => {
+    stopLobbyMusic();
+    setMenuView('START');
   };
 
   if (status === 'PLAYING') {
@@ -796,12 +809,12 @@ export default function App() {
   }
 
   if (menuView === 'START') {
-    return <StartScreen onEnterLobby={() => setMenuView('LOBBY')} profile={profile} onConnectWallet={handleConnectWallet} />;
+    return <StartScreen onEnterLobby={handleEnterLobby} profile={profile} onConnectWallet={handleConnectWallet} />;
   }
 
   return (
     <LobbyScreen
-      onBack={() => setMenuView('START')}
+      onBack={handleBackToStart}
       onStartGame={handleStartGame}
       profile={profile}
       setProfile={setProfile}
