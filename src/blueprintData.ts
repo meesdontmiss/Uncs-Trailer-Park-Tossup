@@ -115,8 +115,8 @@ This is an SPL token-based wager system seamlessly integrated into the lobby flo
 - **Feedback:** Loud aluminum "BONK" sound, a 2D fizz sprite burst on hit, and a clear UI hit-marker.
 
 ## V1 MODES
-1. **1v1 DUEL:** Fixed wager. First to 5 kills wins. High tension, easiest to settle.
-2. **SMALL FFA:** 4-6 players. Top finisher takes all. 
+1. **1v1 DUEL:** Fixed wager. Last player alive wins. High tension, easiest to settle.
+2. **SMALL FFA:** 4-6 players. Last man standing takes first; most kills outside first earns the second-place bonus.
 3. **PRIVATE FRIEND LOBBY:** Invite code based, custom wager setup.
     `
   },

@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type PointerEvent } from 'react';
 import { useGameStore } from '../../store';
-import { KILLS_TO_WIN } from '../../gameTypes';
 import { socket } from '../../lib/socket';
 import {
   requestMobileThrow,
@@ -124,7 +123,6 @@ export function HUD() {
   const cans = useGameStore((state) => state.cans);
   const wager = useGameStore((state) => state.wager);
   const [showScoreboard, setShowScoreboard] = useState(false);
-  const [now, setNow] = useState(Date.now());
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -149,14 +147,6 @@ export function HUD() {
     };
   }, []);
 
-  useEffect(() => {
-    const interval = window.setInterval(() => {
-      setNow(Date.now());
-    }, 100);
-
-    return () => window.clearInterval(interval);
-  }, []);
-
   const myInfo = socket.id ? playersInfo[socket.id] : undefined;
   const sortedPlayers = useMemo(
     () => Object.values(playersInfo).sort((a, b) => (b.kills - a.kills) || (a.deaths - b.deaths)),
@@ -167,10 +157,6 @@ export function HUD() {
     return null;
   }
 
-  const respawnCountdown = myInfo?.respawnAt
-    ? Math.max(0, (myInfo.respawnAt - now) / 1000)
-    : 0;
-
   return (
     <div className="absolute inset-0 pointer-events-none z-10 flex flex-col justify-between">
       <div className="p-4 sm:p-6 flex justify-between items-start font-pixel">
@@ -179,7 +165,7 @@ export function HUD() {
             {myInfo?.health ?? 0} HP
           </div>
           <div className="text-[11px] font-mono text-white/50 mt-2 uppercase tracking-[0.18em]">
-            FIRST TO {KILLS_TO_WIN}
+            LAST MAN STANDING
           </div>
         </div>
 
@@ -195,7 +181,7 @@ export function HUD() {
           </div>
           {!myInfo?.alive && (
             <div className="text-sm text-red-400 font-mono mt-2">
-              RESPAWNING IN {respawnCountdown.toFixed(1)}s
+              ELIMINATED
             </div>
           )}
         </div>

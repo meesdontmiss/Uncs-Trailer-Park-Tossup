@@ -7,17 +7,23 @@ import { arenaColliders, arenaSpawnPoints } from './src/arena';
 import {
   CAN_DAMAGE,
   GRAVITY_Y,
-  KILLS_TO_WIN,
+  HOUSE_FEE_RATE,
   MAX_HEALTH,
   PLAYER_HIT_RADIUS,
   PROJECTILE_TTL_MS,
-  RESPAWN_DELAY_MS,
   SHOOT_COOLDOWN_MS,
+  type LobbyRoomSnapshot,
   type MatchResult,
   type PlayerSnapshot,
   type ProjectileSnapshot,
   type Vec3,
 } from './src/gameTypes';
+
+interface LobbyProfile {
+  walletAddress: string | null;
+  username: string;
+  pfp: string;
+}
 
 interface ServerPlayer extends PlayerSnapshot {
   lastShotAt: number;
@@ -33,7 +39,40 @@ const PORT = Number(process.env.PORT ?? (isProductionRuntime ? 3000 : 3001));
 const PROJECTILE_SIM_STEP_MS = 25;
 const players: Record<string, ServerPlayer> = {};
 const projectiles = new Map<string, ServerProjectile>();
+const lobbySelections = new Map<string, { wager: string; joinedAt: number }>();
+const lobbyProfiles = new Map<string, LobbyProfile>();
 let matchResult: MatchResult | null = null;
+
+function parseBuyInUnc(wager: string) {
+  if (wager === 'FREE') {
+    return 0;
+  }
+
+  const numeric = Number(wager.replace(/[$,UNC\s]/gi, ''));
+  return Number.isFinite(numeric) ? numeric : 0;
+}
+
+function buildMatchResult(winnerId: string | null, reason: MatchResult['reason']): MatchResult {
+  const playerList = Object.values(players);
+  const wager = winnerId ? (lobbySelections.get(winnerId)?.wager ?? 'FREE') : 'FREE';
+  const buyInUnc = parseBuyInUnc(wager);
+  const playerCount = playerList.length;
+  const grossPotUnc = buyInUnc * playerCount;
+  const houseFeeUnc = Number((grossPotUnc * HOUSE_FEE_RATE).toFixed(2));
+
+  return {
+    winnerId,
+    secondPlaceBonusId: chooseSecondPlaceBonusId(winnerId),
+    wager,
+    playerCount,
+    buyInUnc,
+    grossPotUnc,
+    houseFeeUnc,
+    payoutPoolUnc: Number((grossPotUnc - houseFeeUnc).toFixed(2)),
+    reason,
+    endedAt: Date.now(),
+  };
+}
 
 function distanceSquared(a: Vec3, b: Vec3) {
   const dx = a[0] - b[0];
@@ -75,6 +114,44 @@ function snapshotPlayers(): Record<string, PlayerSnapshot> {
       },
     ]),
   );
+}
+
+function snapshotLobbyRooms(): LobbyRoomSnapshot[] {
+  const rooms = new Map<string, LobbyRoomSnapshot>();
+
+  for (const [id, selection] of lobbySelections.entries()) {
+    const room = rooms.get(selection.wager) ?? {
+      wager: selection.wager,
+      players: [],
+    };
+    const profile = lobbyProfiles.get(id);
+    room.players.push({
+      id,
+      joinedAt: selection.joinedAt,
+      walletAddress: profile?.walletAddress ?? null,
+      username: profile?.username ?? `Player_${id.slice(0, 4)}`,
+      pfp: profile?.pfp ?? '🥫',
+    });
+    rooms.set(selection.wager, room);
+  }
+
+  return [...rooms.values()]
+    .map((room) => ({
+      ...room,
+      players: room.players.sort((left, right) => left.joinedAt - right.joinedAt),
+    }))
+    .sort((left, right) => left.wager.localeCompare(right.wager));
+}
+
+function emitLobbyRooms(io: Server) {
+  for (const id of lobbySelections.keys()) {
+    if (!io.sockets.sockets.has(id)) {
+      lobbySelections.delete(id);
+      lobbyProfiles.delete(id);
+    }
+  }
+
+  io.emit('lobbyRooms', snapshotLobbyRooms());
 }
 
 function snapshotProjectile(projectile: ServerProjectile): ProjectileSnapshot {
@@ -253,25 +330,34 @@ function resetArena(io: Server) {
   clearProjectiles(io);
 }
 
-function respawnPlayer(io: Server, playerId: string) {
-  const player = players[playerId];
-  if (!player || matchResult) {
-    return;
-  }
-
-  player.position = chooseSpawnPoint(playerId);
-  player.health = MAX_HEALTH;
-  player.alive = true;
-  player.respawnAt = null;
-  io.emit('playerRespawned', { id: player.id, position: player.position });
-  emitPlayers(io);
-}
-
 function finishMatch(io: Server, result: MatchResult) {
   matchResult = result;
   clearProjectiles(io);
   io.emit('matchEnded', result);
   emitPlayers(io);
+}
+
+function chooseSecondPlaceBonusId(winnerId: string | null) {
+  return Object.values(players)
+    .filter((player) => player.id !== winnerId)
+    .sort((left, right) => (
+      (right.kills - left.kills)
+      || (left.deaths - right.deaths)
+      || left.id.localeCompare(right.id)
+    ))[0]?.id ?? null;
+}
+
+function maybeFinishLastStanding(io: Server) {
+  const alivePlayers = Object.values(players).filter((player) => player.alive);
+  const totalPlayers = Object.keys(players).length;
+
+  if (matchResult || totalPlayers < 2 || alivePlayers.length !== 1) {
+    return false;
+  }
+
+  const winnerId = alivePlayers[0].id;
+  finishMatch(io, buildMatchResult(winnerId, 'lastStanding'));
+  return true;
 }
 
 function handleValidHit(io: Server, ownerId: string, targetId: string, impactPosition: Vec3) {
@@ -299,21 +385,16 @@ function handleValidHit(io: Server, ownerId: string, targetId: string, impactPos
   owner.kills += 1;
   target.deaths += 1;
   target.alive = false;
-  target.respawnAt = Date.now() + RESPAWN_DELAY_MS;
+  target.health = 0;
+  target.respawnAt = null;
 
   io.emit('playerKilled', { targetId, killerId: ownerId });
 
-  if (owner.kills >= KILLS_TO_WIN) {
-    finishMatch(io, {
-      winnerId: ownerId,
-      reason: 'kills',
-      endedAt: Date.now(),
-    });
+  if (maybeFinishLastStanding(io)) {
     return;
   }
 
   emitPlayers(io);
-  setTimeout(() => respawnPlayer(io, targetId), RESPAWN_DELAY_MS);
 }
 
 function findProjectileImpact(projectile: ServerProjectile, start: Vec3, end: Vec3) {
@@ -426,8 +507,41 @@ async function startServer() {
 
   io.on('connection', (socket) => {
     console.log('Socket connected:', socket.id);
+    socket.emit('lobbyRooms', snapshotLobbyRooms());
+
+    socket.on('selectLobby', (wager: string) => {
+      lobbySelections.set(socket.id, {
+        wager,
+        joinedAt: lobbySelections.get(socket.id)?.joinedAt ?? Date.now(),
+      });
+      emitLobbyRooms(io);
+    });
+
+    socket.on('saveProfile', (profile: Partial<LobbyProfile>) => {
+      const username = typeof profile.username === 'string'
+        ? profile.username.trim().slice(0, 18)
+        : '';
+      const pfp = typeof profile.pfp === 'string'
+        ? profile.pfp.trim().slice(0, 80)
+        : '🥫';
+      const walletAddress = typeof profile.walletAddress === 'string' && profile.walletAddress
+        ? profile.walletAddress
+        : null;
+
+      lobbyProfiles.set(socket.id, {
+        walletAddress,
+        username: username || `Player_${socket.id.slice(0, 4)}`,
+        pfp: pfp || '🥫',
+      });
+      emitLobbyRooms(io);
+    });
 
     socket.on('joinMatch', () => {
+      if (!lobbySelections.has(socket.id)) {
+        lobbySelections.set(socket.id, { wager: 'FREE', joinedAt: Date.now() });
+        emitLobbyRooms(io);
+      }
+
       if (matchResult && Object.keys(players).length === 0) {
         resetArena(io);
       }
@@ -509,6 +623,8 @@ async function startServer() {
       }
 
       delete players[socket.id];
+      lobbySelections.delete(socket.id);
+      lobbyProfiles.delete(socket.id);
 
       for (const [projectileId, projectile] of projectiles.entries()) {
         if (projectile.ownerId === socket.id) {
@@ -517,14 +633,11 @@ async function startServer() {
       }
 
       io.emit('playerLeft', socket.id);
+      emitLobbyRooms(io);
 
       const remainingPlayers = Object.values(players);
       if (!matchResult && remainingPlayers.length === 1) {
-        finishMatch(io, {
-          winnerId: remainingPlayers[0].id,
-          reason: 'forfeit',
-          endedAt: Date.now(),
-        });
+        finishMatch(io, buildMatchResult(remainingPlayers[0].id, 'forfeit'));
       } else if (remainingPlayers.length === 0) {
         resetArena(io);
       } else {

@@ -30,7 +30,7 @@ export function Player() {
   const lastSync = useRef(0);
   const hasSpawned = useRef(false);
   const previousAlive = useRef<boolean | null>(null);
-  const baseSpriteYOffset = -1.25;
+  const baseSpriteYOffset = 0;
 
   const myInfo = useGameStore((state) => (socket.id ? state.playersInfo[socket.id] : undefined));
 
@@ -195,7 +195,7 @@ export function Player() {
       body.current.setLinvel({ x: 0, y: Math.min(0, currentVelocity.y), z: 0 }, true);
       if (spriteMeshRef.current) {
         spriteMeshRef.current.rotation.x = THREE.MathUtils.lerp(spriteMeshRef.current.rotation.x, -Math.PI / 2, delta * 15);
-        spriteMeshRef.current.position.y = THREE.MathUtils.lerp(spriteMeshRef.current.position.y, -3, delta * 15);
+        spriteMeshRef.current.position.y = THREE.MathUtils.lerp(spriteMeshRef.current.position.y, -1.75, delta * 15);
       }
       return;
     }

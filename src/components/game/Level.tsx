@@ -1,5 +1,7 @@
+import { useMemo, useRef } from 'react';
 import { RigidBody } from '@react-three/rapier';
 import { Billboard, useTexture } from '@react-three/drei';
+import { useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
 import { assets } from './assets';
 import { carPlacements, clutterPlacements, couchPlacements, trailerPlacements } from '../../arena';
@@ -38,6 +40,114 @@ const groundDecalPlacements: Array<{
   { position: [5, 0.08, 34], scale: [8.5, 8.5], rotationY: -1.4 },
   { position: [0, 0.08, 59], scale: [7, 7], rotationY: 0.8 },
 ];
+
+const treePlacements: Array<{ position: [number, number, number]; scale: number }> = [
+  { position: [-62, 0, -58], scale: 1.25 },
+  { position: [-58, 0, -24], scale: 1.05 },
+  { position: [-61, 0, 22], scale: 1.18 },
+  { position: [-53, 0, 58], scale: 0.95 },
+  { position: [58, 0, -54], scale: 1.12 },
+  { position: [63, 0, -18], scale: 0.9 },
+  { position: [57, 0, 26], scale: 1.22 },
+  { position: [62, 0, 60], scale: 1.05 },
+  { position: [-30, 0, 68], scale: 0.9 },
+  { position: [35, 0, -68], scale: 1.0 },
+  { position: [-42, 0, -6], scale: 0.82 },
+  { position: [42, 0, 8], scale: 0.88 },
+  { position: [-36, 0, 33], scale: 0.78 },
+  { position: [36, 0, -33], scale: 0.82 },
+];
+
+const chairPlacements: Array<{ position: [number, number, number]; rotationY: number; color: string }> = [
+  { position: [-11, 0.08, -14], rotationY: 0.35, color: '#f0d25b' },
+  { position: [-18, 0.08, 18], rotationY: -0.65, color: '#9fb6c7' },
+  { position: [14, 0.08, -24], rotationY: 0.9, color: '#d87952' },
+  { position: [18, 0.08, 12], rotationY: -1.1, color: '#87a35d' },
+  { position: [7, 0.08, 48], rotationY: 0.25, color: '#d8c7a2' },
+  { position: [-6, 0.08, -48], rotationY: -0.2, color: '#c9dc75' },
+  { position: [6, 0.08, -52], rotationY: 0.3, color: '#70a6b8' },
+];
+
+const chickenPlacements: Array<{ origin: [number, number, number]; radius: number; speed: number; phase: number }> = [
+  { origin: [-8, 0.18, -36], radius: 3.2, speed: 0.8, phase: 0 },
+  { origin: [4, 0.18, -34], radius: 2.1, speed: 1.1, phase: 0.8 },
+  { origin: [10, 0.18, -8], radius: 2.6, speed: 1.05, phase: 1.7 },
+  { origin: [-6, 0.18, 28], radius: 3.8, speed: 0.65, phase: 3.2 },
+  { origin: [16, 0.18, 42], radius: 2.4, speed: 0.95, phase: 4.1 },
+];
+
+function makeBillboardTexture(kind: 'tree' | 'chicken') {
+  const canvas = document.createElement('canvas');
+  canvas.width = 256;
+  canvas.height = 256;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) {
+    return new THREE.CanvasTexture(canvas);
+  }
+
+  ctx.clearRect(0, 0, 256, 256);
+  if (kind === 'tree') {
+    ctx.fillStyle = '#5a3e24';
+    ctx.fillRect(113, 112, 30, 104);
+    ctx.fillStyle = '#3f2a19';
+    ctx.fillRect(128, 118, 9, 98);
+    ctx.fillStyle = '#314f29';
+    ctx.beginPath();
+    ctx.ellipse(124, 94, 70, 55, -0.18, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#496f37';
+    ctx.beginPath();
+    ctx.ellipse(91, 112, 45, 35, -0.35, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#5f8846';
+    ctx.beginPath();
+    ctx.ellipse(153, 108, 53, 40, 0.25, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(25,32,18,0.55)';
+    ctx.lineWidth = 5;
+    ctx.stroke();
+  } else {
+    ctx.fillStyle = '#ead7aa';
+    ctx.beginPath();
+    ctx.ellipse(122, 146, 52, 34, -0.08, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(164, 118, 25, 25, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#c73523';
+    ctx.beginPath();
+    ctx.arc(166, 94, 12, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#e89925';
+    ctx.beginPath();
+    ctx.moveTo(188, 119);
+    ctx.lineTo(217, 128);
+    ctx.lineTo(188, 137);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = '#5f3e1f';
+    ctx.lineWidth = 7;
+    ctx.beginPath();
+    ctx.moveTo(102, 173);
+    ctx.lineTo(94, 210);
+    ctx.moveTo(140, 172);
+    ctx.lineTo(148, 210);
+    ctx.stroke();
+    ctx.fillStyle = '#1b1510';
+    ctx.beginPath();
+    ctx.arc(172, 114, 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(61,40,25,0.65)';
+    ctx.lineWidth = 4;
+    ctx.strokeRect(78, 91, 111, 91);
+  }
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.magFilter = THREE.NearestFilter;
+  texture.minFilter = THREE.LinearFilter;
+  texture.needsUpdate = true;
+  return texture;
+}
 
 function ParkSign3D({ texture }: { texture: THREE.Texture }) {
   return (
@@ -172,11 +282,97 @@ function Couch3D({
   );
 }
 
+function TreeBillboard({ texture, position, scale }: { texture: THREE.Texture; position: [number, number, number]; scale: number }) {
+  return (
+    <Billboard position={[position[0], position[1] + (5.2 * scale), position[2]]} follow lockX lockZ>
+      <mesh castShadow>
+        <planeGeometry args={[8 * scale, 11 * scale]} />
+        <meshStandardMaterial
+          map={texture}
+          transparent
+          alphaTest={0.08}
+          side={THREE.DoubleSide}
+          roughness={1}
+        />
+      </mesh>
+    </Billboard>
+  );
+}
+
+function LawnChair2D({ position, rotationY, color }: { position: [number, number, number]; rotationY: number; color: string }) {
+  return (
+    <group position={position} rotation={[0, rotationY, 0]}>
+      <mesh castShadow receiveShadow position={[0, 0.45, 0]} rotation={[-0.35, 0, 0]}>
+        <boxGeometry args={[1.8, 0.12, 1.4]} />
+        <meshStandardMaterial color={color} roughness={0.8} />
+      </mesh>
+      <mesh castShadow receiveShadow position={[0, 1.18, -0.7]} rotation={[0.55, 0, 0]}>
+        <boxGeometry args={[1.8, 0.12, 1.6]} />
+        <meshStandardMaterial color={color} roughness={0.8} />
+      </mesh>
+      {[-0.72, 0.72].map((x) => (
+        <mesh key={x} castShadow receiveShadow position={[x, 0.62, 0.05]}>
+          <boxGeometry args={[0.12, 1.1, 0.12]} />
+          <meshStandardMaterial color="#d8d0bd" roughness={0.65} metalness={0.1} />
+        </mesh>
+      ))}
+    </group>
+  );
+}
+
+function ChickenBillboard({
+  texture,
+  origin,
+  radius,
+  speed,
+  phase,
+}: {
+  texture: THREE.Texture;
+  origin: [number, number, number];
+  radius: number;
+  speed: number;
+  phase: number;
+}) {
+  const group = useRef<THREE.Group>(null);
+
+  useFrame(({ clock }) => {
+    if (!group.current) {
+      return;
+    }
+
+    const t = (clock.elapsedTime * speed) + phase;
+    group.current.position.set(
+      origin[0] + Math.cos(t) * radius,
+      origin[1] + Math.abs(Math.sin(t * 4)) * 0.08,
+      origin[2] + Math.sin(t * 0.7) * radius,
+    );
+  });
+
+  return (
+    <group ref={group} position={origin}>
+      <Billboard follow lockX lockZ>
+        <mesh castShadow>
+          <planeGeometry args={[2.4, 2.4]} />
+          <meshStandardMaterial
+            map={texture}
+            transparent
+            alphaTest={0.08}
+            side={THREE.DoubleSide}
+            roughness={0.9}
+          />
+        </mesh>
+      </Billboard>
+    </group>
+  );
+}
+
 // --------------------------------------------------------
 // The Level
 // --------------------------------------------------------
 
 export function Level() {
+  const treeTexture = useMemo(() => makeBillboardTexture('tree'), []);
+  const chickenTexture = useMemo(() => makeBillboardTexture('chicken'), []);
   const props = useTexture({
     grass: assets.terrain.grass,
     dirt: assets.terrain.dirt,
@@ -198,14 +394,14 @@ export function Level() {
       <RigidBody type="fixed" colliders="cuboid" position={[0, -0.5, 0]}>
         <mesh receiveShadow>
           <boxGeometry args={[150, 1, 150]} />
-          <meshStandardMaterial map={props.grass} color="#8ab56e" />
+          <meshStandardMaterial map={props.grass} color="#9fc47b" roughness={0.92} />
         </mesh>
       </RigidBody>
 
       {/* Dirt Road cutting through the park */}
       <mesh receiveShadow position={[0, 0.05, 0]} rotation={[-Math.PI / 2, 0, 0]}>
         <planeGeometry args={[16, 150]} />
-        <meshStandardMaterial map={props.dirt} color="#5e4933" roughness={1} />
+        <meshStandardMaterial map={props.dirt} color="#6b6045" roughness={1} />
       </mesh>
 
       {groundDecalPlacements.map((decal, index) => (
@@ -227,6 +423,35 @@ export function Level() {
       ))}
 
       <ParkSign3D texture={props.parkSign} />
+
+      {treePlacements.map((tree, index) => (
+        <TreeBillboard
+          key={`tree-${index}`}
+          texture={treeTexture}
+          position={tree.position}
+          scale={tree.scale}
+        />
+      ))}
+
+      {chairPlacements.map((chair, index) => (
+        <LawnChair2D
+          key={`chair-${index}`}
+          position={chair.position}
+          rotationY={chair.rotationY}
+          color={chair.color}
+        />
+      ))}
+
+      {chickenPlacements.map((chicken, index) => (
+        <ChickenBillboard
+          key={`chicken-${index}`}
+          texture={chickenTexture}
+          origin={chicken.origin}
+          radius={chicken.radius}
+          speed={chicken.speed}
+          phase={chicken.phase}
+        />
+      ))}
 
       {/* Invisible boundaries to keep the player inside the map */}
       {/* Expanding the map outward to give more roaming room */}

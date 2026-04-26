@@ -1,7 +1,7 @@
 import { Suspense, useEffect, useState } from 'react';
 import { Canvas } from '@react-three/fiber';
 import { Physics } from '@react-three/rapier';
-import { KeyboardControls, Sky } from '@react-three/drei';
+import { Cloud, Clouds, Environment, KeyboardControls, Sky } from '@react-three/drei';
 import { Level } from './Level';
 import { Player } from './Player';
 import { CanProjectile } from './CanProjectile';
@@ -201,17 +201,63 @@ export function GameWorld() {
 
   return (
     <KeyboardControls map={keyboardMap}>
-      <Canvas shadows camera={{ fov: 75 }}>
-        <color attach="background" args={['#201714']} />
-        <fog attach="fog" args={['#201714', 55, 145]} />
-        <Sky sunPosition={[-80, 12, -100]} turbidity={1.8} rayleigh={0.7} mieCoefficient={0.012} mieDirectionalG={0.78} />
-        <hemisphereLight args={['#ffbd72', '#273522', 0.65]} />
-        <ambientLight intensity={0.32} />
+      <Canvas
+        shadows
+        camera={{ fov: 75 }}
+        gl={{ alpha: false, antialias: true }}
+        onCreated={({ gl }) => {
+          gl.setClearColor('#9dc8e6', 1);
+        }}
+      >
+        <color attach="background" args={['#9dc8e6']} />
+        <fog attach="fog" args={['#b8d0dd', 72, 170]} />
+        <Sky
+          distance={450000}
+          sunPosition={[-55, 35, -80]}
+          turbidity={4.5}
+          rayleigh={1.8}
+          mieCoefficient={0.006}
+          mieDirectionalG={0.72}
+        />
+        <Suspense fallback={null}>
+          <Environment preset="park" environmentIntensity={0.72} />
+          <Clouds limit={60} range={220}>
+            <Cloud
+              seed={14}
+              position={[-90, 92, -170]}
+              bounds={[36, 7, 12]}
+              scale={[2.6, 0.8, 1.1]}
+              volume={8}
+              opacity={0.18}
+              color="#f7fbff"
+            />
+            <Cloud
+              seed={27}
+              position={[88, 104, -140]}
+              bounds={[40, 8, 14]}
+              scale={[2.9, 0.85, 1.15]}
+              volume={10}
+              opacity={0.16}
+              color="#edf6ff"
+            />
+            <Cloud
+              seed={41}
+              position={[12, 112, 150]}
+              bounds={[50, 7, 16]}
+              scale={[3.2, 0.75, 1.25]}
+              volume={10}
+              opacity={0.14}
+              color="#f4f8fa"
+            />
+          </Clouds>
+        </Suspense>
+        <hemisphereLight args={['#d9ecff', '#52694a', 0.82]} />
+        <ambientLight intensity={0.24} />
         <directionalLight
           castShadow
-          position={[-28, 30, -18]}
-          color="#ffb15a"
-          intensity={2.2}
+          position={[-32, 42, -28]}
+          color="#fff4d4"
+          intensity={1.65}
           shadow-mapSize={[2048, 2048]}
           shadow-camera-left={-50}
           shadow-camera-right={50}

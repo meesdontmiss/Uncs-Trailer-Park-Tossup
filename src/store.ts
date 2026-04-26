@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { ImpactSnapshot, MatchResult, PlayerSnapshot, ProjectileSnapshot } from './gameTypes';
+import type { ImpactSnapshot, LobbyRoomSnapshot, MatchResult, PlayerSnapshot, ProjectileSnapshot } from './gameTypes';
 
 export interface Can extends ProjectileSnapshot {}
 export interface Impact extends ImpactSnapshot {}
@@ -10,6 +10,7 @@ interface GameState {
   cans: Can[];
   impacts: Impact[];
   playersInfo: Record<string, PlayerSnapshot>;
+  lobbyRooms: LobbyRoomSnapshot[];
   matchResult: MatchResult | null;
   setWager: (wager: string) => void;
   startGame: () => void;
@@ -18,6 +19,7 @@ interface GameState {
   addImpact: (impact: Impact) => void;
   removeImpact: (id: string) => void;
   setPlayersInfo: (info: Record<string, PlayerSnapshot>) => void;
+  setLobbyRooms: (rooms: LobbyRoomSnapshot[]) => void;
   setMatchResult: (result: MatchResult) => void;
   endGame: (result?: MatchResult) => void;
   reset: () => void;
@@ -29,6 +31,7 @@ export const useGameStore = create<GameState>((set) => ({
   cans: [],
   impacts: [],
   playersInfo: {},
+  lobbyRooms: [],
   matchResult: null,
   setWager: (wager) => set({ wager }),
   
@@ -52,6 +55,7 @@ export const useGameStore = create<GameState>((set) => ({
     impacts: state.impacts.filter(i => i.id !== id)
   })),
   setPlayersInfo: (info) => set({ playersInfo: info }),
+  setLobbyRooms: (rooms) => set({ lobbyRooms: rooms }),
   setMatchResult: (result) => set({ matchResult: result, status: 'RESULT' }),
   endGame: (result) => set({
     status: 'RESULT',
