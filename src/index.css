@@ -13,6 +13,18 @@
 body {
   background-color: var(--color-ps-gray);
   color: white;
+  overflow-x: hidden;
+  overscroll-behavior: none;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+canvas {
+  touch-action: none;
 }
 
 .markdown-body h2 {

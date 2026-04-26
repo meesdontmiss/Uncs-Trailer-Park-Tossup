@@ -1,20 +1,70 @@
 import { RigidBody } from '@react-three/rapier';
-import { useTexture } from '@react-three/drei';
+import { Billboard, useTexture } from '@react-three/drei';
 import * as THREE from 'three';
+import { assets } from './assets';
+import { carPlacements, clutterPlacements, couchPlacements, trailerPlacements } from '../../arena';
 
 // --------------------------------------------------------
 // Custom Map Props (Composed 3D Shapes)
 // --------------------------------------------------------
 
-function Clutter3D({ position }: any) {
+const clutterCanOffsets: [number, number, number][] = [
+  [-1.6, 0.05, -0.9],
+  [0.4, 0.05, -1.1],
+  [1.1, 0.05, 0.2],
+  [-0.7, 0.05, 1.1],
+  [1.5, 0.05, 1.3],
+];
+
+const clutterButtOffsets: [number, number, number][] = [
+  [-1.4, 0.02, 0.8],
+  [-0.5, 0.02, -1.3],
+  [0.2, 0.02, 0.3],
+  [0.9, 0.02, -0.7],
+  [1.3, 0.02, 1.1],
+  [-1, 0.02, -0.1],
+  [0.6, 0.02, 1.5],
+  [1.7, 0.02, -1.4],
+];
+
+const groundDecalPlacements: Array<{
+  position: [number, number, number];
+  scale: [number, number];
+  rotationY: number;
+}> = [
+  { position: [-6, 0.08, -48], scale: [9, 9], rotationY: 0.2 },
+  { position: [6, 0.08, -20], scale: [8, 8], rotationY: -0.7 },
+  { position: [-7, 0.08, 8], scale: [7, 7], rotationY: 1.1 },
+  { position: [5, 0.08, 34], scale: [8.5, 8.5], rotationY: -1.4 },
+  { position: [0, 0.08, 59], scale: [7, 7], rotationY: 0.8 },
+];
+
+function ParkSign3D({ texture }: { texture: THREE.Texture }) {
+  return (
+    <Billboard position={[0, 5.25, -70]} follow lockX lockZ>
+      <mesh>
+        <planeGeometry args={[10, 10]} />
+        <meshStandardMaterial
+          map={texture}
+          transparent
+          alphaTest={0.08}
+          side={THREE.DoubleSide}
+          roughness={0.9}
+        />
+      </mesh>
+    </Billboard>
+  );
+}
+
+function Clutter3D({ position }: { position: [number, number, number] }) {
   return (
     <group position={position}>
       {/* Scattered beer cans */}
-      {[...Array(5)].map((_, i) => (
+      {clutterCanOffsets.map((offset, i) => (
         <mesh 
           key={`can-${i}`} 
-          position={[(Math.random() - 0.5) * 4, 0.05, (Math.random() - 0.5) * 4]} 
-          rotation={[Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI]}
+          position={offset}
+          rotation={[0.35 * (i + 1), 0.6 * (i + 1), 0.2 * (i + 1)]}
         >
           <cylinderGeometry args={[0.08, 0.08, 0.25, 8]} />
           <meshStandardMaterial color="#b0b0b0" metalness={0.8} roughness={0.2} />
@@ -22,11 +72,11 @@ function Clutter3D({ position }: any) {
       ))}
       
       {/* Scattered cigarette butts */}
-      {[...Array(8)].map((_, i) => (
+      {clutterButtOffsets.map((offset, i) => (
         <mesh 
           key={`butt-${i}`} 
-          position={[(Math.random() - 0.5) * 4, 0.02, (Math.random() - 0.5) * 4]} 
-          rotation={[Math.PI / 2, Math.random() * Math.PI, 0]}
+          position={offset}
+          rotation={[Math.PI / 2, 0.45 * (i + 1), 0]}
         >
           <cylinderGeometry args={[0.02, 0.02, 0.1, 4]} />
           <meshStandardMaterial color="#e6a46a" roughness={1} />
@@ -36,7 +86,15 @@ function Clutter3D({ position }: any) {
   );
 }
 
-function Trailer3D({ position, rotation = [0, 0, 0], color = "#bfbaad" }: any) {
+function Trailer3D({
+  position,
+  rotation = [0, 0, 0],
+  color = '#bfbaad',
+}: {
+  position: [number, number, number];
+  rotation?: [number, number, number];
+  color?: string;
+}) {
   return (
     <RigidBody type="fixed" colliders="cuboid" position={position} rotation={rotation}>
       {/* Main Body */}
@@ -68,7 +126,15 @@ function Trailer3D({ position, rotation = [0, 0, 0], color = "#bfbaad" }: any) {
   );
 }
 
-function Car3D({ position, rotation = [0, 0, 0], color = "#8a3f33" }: any) {
+function Car3D({
+  position,
+  rotation = [0, 0, 0],
+  color = '#8a3f33',
+}: {
+  position: [number, number, number];
+  rotation?: [number, number, number];
+  color?: string;
+}) {
   return (
     <RigidBody type="fixed" colliders="cuboid" position={position} rotation={rotation}>
       {/* Base */}
@@ -85,7 +151,13 @@ function Car3D({ position, rotation = [0, 0, 0], color = "#8a3f33" }: any) {
   );
 }
 
-function Couch3D({ position, rotation = [0, 0, 0] }: any) {
+function Couch3D({
+  position,
+  rotation = [0, 0, 0],
+}: {
+  position: [number, number, number];
+  rotation?: [number, number, number];
+}) {
   return (
     <RigidBody type="fixed" colliders="cuboid" position={position} rotation={rotation}>
       <mesh castShadow receiveShadow position={[0, 0.5, 0]}>
@@ -105,10 +177,11 @@ function Couch3D({ position, rotation = [0, 0, 0] }: any) {
 // --------------------------------------------------------
 
 export function Level() {
-  // Use raw GitHub CDN URLs to ensure we get some nice basic HD textures without needing massive public/ uploads
   const props = useTexture({
-    grass: 'https://cdn.jsdelivr.net/gh/mrdoob/three.js@r149/examples/textures/terrain/grasslight-big.jpg',
-    dirt: 'https://cdn.jsdelivr.net/gh/mrdoob/three.js@r149/examples/textures/terrain/grasslight-big.jpg' // Re-using grass texture but we will color-tint it for dirt!
+    grass: assets.terrain.grass,
+    dirt: assets.terrain.dirt,
+    groundClutter: assets.terrain.groundClutter,
+    parkSign: assets.terrain.parkSign,
   });
 
   props.grass.wrapS = props.grass.wrapT = THREE.RepeatWrapping;
@@ -116,6 +189,8 @@ export function Level() {
   
   props.dirt.wrapS = props.dirt.wrapT = THREE.RepeatWrapping;
   props.dirt.repeat.set(10, 30);
+  props.groundClutter.anisotropy = 8;
+  props.parkSign.anisotropy = 8;
 
   return (
     <group>
@@ -132,6 +207,26 @@ export function Level() {
         <planeGeometry args={[16, 150]} />
         <meshStandardMaterial map={props.dirt} color="#5e4933" roughness={1} />
       </mesh>
+
+      {groundDecalPlacements.map((decal, index) => (
+        <mesh
+          key={`ground-decal-${index}`}
+          position={decal.position}
+          rotation={[-Math.PI / 2, 0, decal.rotationY]}
+          renderOrder={2}
+        >
+          <planeGeometry args={decal.scale} />
+          <meshStandardMaterial
+            map={props.groundClutter}
+            transparent
+            alphaTest={0.08}
+            depthWrite={false}
+            roughness={1}
+          />
+        </mesh>
+      ))}
+
+      <ParkSign3D texture={props.parkSign} />
 
       {/* Invisible boundaries to keep the player inside the map */}
       {/* Expanding the map outward to give more roaming room */}
@@ -168,33 +263,45 @@ export function Level() {
 
       {/* ------------- Layout ------------- */}
       {/* Main row 1 (Left Side) */}
-      <Trailer3D position={[-25, 0, -50]} color="#b8c2a3" />
-      <Trailer3D position={[-25, 0, -20]} color="#d3d3d3" />
-      <Trailer3D position={[-25, 0, 10]} color="#a3b8c2" />
-      <Trailer3D position={[-25, 0, 40]} color="#c2bda3" />
+      {trailerPlacements.slice(0, 4).map((placement, index) => (
+        <Trailer3D
+          key={`trailer-left-${index}`}
+          position={placement.position}
+          rotation={[0, placement.rotationY ?? 0, 0]}
+          color={placement.color}
+        />
+      ))}
       
-      <Couch3D position={[-16, 0.5, -10]} rotation={[0, 0.4, 0]} />
-      <Clutter3D position={[-16, 0, -9]} />
+      <Couch3D position={couchPlacements[0].position} rotation={[0, couchPlacements[0].rotationY ?? 0, 0]} />
+      <Clutter3D position={clutterPlacements[0].position} />
 
       {/* Row 2 (Right Side, facing road) */}
-      <Trailer3D position={[25, 0, -40]} rotation={[0, Math.PI, 0]} color="#b2c2a3" />
-      <Trailer3D position={[25, 0, -10]} rotation={[0, Math.PI, 0]} color="#d3d3d3" />
-      <Trailer3D position={[25, 0, 20]} rotation={[0, Math.PI, 0]} color="#a3a8c2" />
-      <Trailer3D position={[25, 0, 50]} rotation={[0, Math.PI, 0]} color="#c2a3a3" />
+      {trailerPlacements.slice(4).map((placement, index) => (
+        <Trailer3D
+          key={`trailer-right-${index}`}
+          position={placement.position}
+          rotation={[0, placement.rotationY ?? 0, 0]}
+          color={placement.color}
+        />
+      ))}
       
-      <Couch3D position={[15, 0.5, 30]} rotation={[0, -0.2, 0]} />
-      <Clutter3D position={[15, 0, 28]} />
+      <Couch3D position={couchPlacements[1].position} rotation={[0, couchPlacements[1].rotationY ?? 0, 0]} />
+      <Clutter3D position={clutterPlacements[1].position} />
       
       {/* Cars parked scattered */}
-      <Car3D position={[-12, 0, -35]} rotation={[0, 0.5, 0]} color="#8a3f33" />
-      <Car3D position={[12, 0, 0]} rotation={[0, -0.3, 0]} color="#334d8a" />
-      <Car3D position={[-12, 0, 25]} rotation={[0, 1.2, 0]} color="#8a7933" />
-      <Car3D position={[10, 0, 40]} rotation={[0, -1.5, 0]} color="#4a4a4a" />
+      {carPlacements.map((placement, index) => (
+        <Car3D
+          key={`car-${index}`}
+          position={placement.position}
+          rotation={[0, placement.rotationY ?? 0, 0]}
+          color={placement.color}
+        />
+      ))}
 
       {/* Some random clutter spots */}
-      <Clutter3D position={[0, 0, 10]} />
-      <Clutter3D position={[-5, 0, -25]} />
-      <Clutter3D position={[8, 0, -40]} />
+      {clutterPlacements.slice(2).map((placement, index) => (
+        <Clutter3D key={`clutter-${index}`} position={placement.position} />
+      ))}
       
     </group>
   );

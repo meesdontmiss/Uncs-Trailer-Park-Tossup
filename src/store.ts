@@ -1,66 +1,68 @@
 import { create } from 'zustand';
+import type { ImpactSnapshot, MatchResult, PlayerSnapshot, ProjectileSnapshot } from './gameTypes';
 
-export interface Can {
-  id: string;
-  position: [number, number, number];
-  velocity: [number, number, number];
-  isLocal?: boolean;
-}
-
-export interface Impact {
-  id: string;
-  position: [number, number, number];
-  timestamp: number;
-}
+export interface Can extends ProjectileSnapshot {}
+export interface Impact extends ImpactSnapshot {}
 
 interface GameState {
   status: 'LOBBY' | 'PLAYING' | 'RESULT';
-  health: number;
-  score: number;
-  cansThrown: number;
   wager: string;
   cans: Can[];
   impacts: Impact[];
-  playersInfo: Record<string, any>;
+  playersInfo: Record<string, PlayerSnapshot>;
+  matchResult: MatchResult | null;
+  setWager: (wager: string) => void;
   startGame: () => void;
-  takeDamage: (amount: number) => void;
-  addScore: () => void;
-  throwCan: (position: [number, number, number], velocity: [number, number, number], isLocal?: boolean) => void;
-  addImpact: (position: [number, number, number]) => void;
+  registerCan: (projectile: Can) => void;
+  removeCan: (id: string) => void;
+  addImpact: (impact: Impact) => void;
   removeImpact: (id: string) => void;
-  setPlayersInfo: (info: Record<string, any>) => void;
-  endGame: () => void;
+  setPlayersInfo: (info: Record<string, PlayerSnapshot>) => void;
+  setMatchResult: (result: MatchResult) => void;
+  endGame: (result?: MatchResult) => void;
   reset: () => void;
 }
 
 export const useGameStore = create<GameState>((set) => ({
   status: 'LOBBY',
-  health: 100,
-  score: 0,
-  cansThrown: 0,
-  wager: '0.1 SOL',
+  wager: 'FREE',
   cans: [],
   impacts: [],
   playersInfo: {},
+  matchResult: null,
+  setWager: (wager) => set({ wager }),
   
-  startGame: () => set({ status: 'PLAYING', health: 100, score: 0, cansThrown: 0, cans: [], impacts: [] }),
-  takeDamage: (amount) => set((state) => {
-    const newHealth = Math.max(0, state.health - amount);
-    if (newHealth === 0) return { health: 0, status: 'RESULT' };
-    return { health: newHealth };
+  startGame: () => set({
+    status: 'PLAYING',
+    cans: [],
+    impacts: [],
+    playersInfo: {},
+    matchResult: null,
   }),
-  throwCan: (position, velocity, isLocal = true) => set((state) => ({ 
-    cansThrown: isLocal ? state.cansThrown + 1 : state.cansThrown,
-    cans: [...state.cans, { id: Math.random().toString(), position, velocity, isLocal }] 
+  registerCan: (projectile) => set((state) => ({
+    cans: [...state.cans.filter((can) => can.id !== projectile.id), projectile],
   })),
-  addImpact: (position) => set((state) => ({
-    impacts: [...state.impacts, { id: Math.random().toString(), position, timestamp: Date.now() }]
+  removeCan: (id) => set((state) => ({
+    cans: state.cans.filter((can) => can.id !== id),
+  })),
+  addImpact: (impact) => set((state) => ({
+    impacts: [...state.impacts.filter((entry) => entry.id !== impact.id), impact],
   })),
   removeImpact: (id) => set((state) => ({
     impacts: state.impacts.filter(i => i.id !== id)
   })),
   setPlayersInfo: (info) => set({ playersInfo: info }),
-  addScore: () => set((state) => ({ score: state.score + 1 })),
-  endGame: () => set({ status: 'RESULT' }),
-  reset: () => set({ status: 'LOBBY' })
+  setMatchResult: (result) => set({ matchResult: result, status: 'RESULT' }),
+  endGame: (result) => set({
+    status: 'RESULT',
+    matchResult: result ?? null,
+    cans: [],
+  }),
+  reset: () => set({
+    status: 'LOBBY',
+    cans: [],
+    impacts: [],
+    playersInfo: {},
+    matchResult: null,
+  }),
 }));

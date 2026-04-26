@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useMemo } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
 import { RigidBody, RapierRigidBody, CapsuleCollider } from '@react-three/rapier';
 import { useKeyboardControls, Billboard } from '@react-three/drei';
@@ -6,7 +6,8 @@ import * as THREE from 'three';
 import { useGameStore } from '../../store';
 import { assets } from './assets';
 import { socket } from '../../lib/socket';
-import { playThrowSound, playKillSound, playDeathBassSound } from '../../lib/audio';
+import { playThrowSound } from '../../lib/audio';
+import { readMobileControls } from '../../lib/mobileControls';
 
 const SPEED = 15;
 const JUMP_FORCE = 8;
@@ -15,58 +16,38 @@ const THROW_POWER = 40;
 export function Player() {
   const body = useRef<RapierRigidBody>(null);
   const materialRef = useRef<THREE.MeshStandardMaterial>(null);
-  const [subscribeKeys, getKeys] = useKeyboardControls();
+  const [, getKeys] = useKeyboardControls();
   const { camera } = useThree();
   const spriteMeshRef = useRef<THREE.Mesh>(null);
   const walkTime = useRef(0);
-  
-  // Custom camera tracking (Third Person Yaw/Pitch)
   const [yaw, setYaw] = useState(0);
   const [pitch, setPitch] = useState(0);
   const [isDead, setIsDead] = useState(false);
   const yawRef = useRef(yaw);
   const pitchRef = useRef(pitch);
   const lastShootTime = useRef(0);
+  const lastMobileThrowRequest = useRef(0);
   const lastSync = useRef(0);
+  const hasSpawned = useRef(false);
+  const previousAlive = useRef<boolean | null>(null);
+  const baseSpriteYOffset = -1.25;
 
-  useEffect(() => {
-    const onKill = ({ targetId, killerId }: any) => {
-      if (killerId === socket.id) {
-         playKillSound();
-      }
-      if (targetId === socket.id && body.current) {
-         // I died!
-         setIsDead(true);
-         
-         // Wait a moment so we can see ourselves fall flat, then respawn
-         setTimeout(() => {
-            body.current?.setTranslation({ x: (Math.random() - 0.5) * 40, y: 10, z: (Math.random() - 0.5) * 40 }, true);
-            body.current?.setLinvel({ x: 0, y: 0, z: 0 }, true);
-            setIsDead(false);
-         }, 3000);
-      }
-    };
-    socket.on('playerKilled', onKill);
-    return () => { socket.off('playerKilled', onKill); };
-  }, []);
+  const myInfo = useGameStore((state) => (socket.id ? state.playersInfo[socket.id] : undefined));
 
   const textures = useMemo(() => {
     const loader = new THREE.TextureLoader();
-    const map = assets.sprites.unc.map(path => {
-      const tex = loader.load(path);
-      tex.magFilter = THREE.NearestFilter; // Give it that crunchy PS1 vibe
-      return tex;
+    return assets.sprites.unc.map((path) => {
+      const texture = loader.load(path);
+      texture.magFilter = THREE.NearestFilter;
+      return texture;
     });
-    return map;
   }, []);
 
   const shootTexture = useMemo(() => {
-    const tex = new THREE.TextureLoader().load(assets.sprites.UNC_SHOOT_BACK);
-    tex.magFilter = THREE.NearestFilter;
-    return tex;
+    const texture = new THREE.TextureLoader().load(assets.sprites.UNC_SHOOT_BACK);
+    texture.magFilter = THREE.NearestFilter;
+    return texture;
   }, []);
-  
-  const throwCan = useGameStore(s => s.throwCan);
 
   useEffect(() => {
     yawRef.current = yaw;
@@ -74,39 +55,59 @@ export function Player() {
   }, [yaw, pitch]);
 
   useEffect(() => {
-    const handleMouseMove = (e: MouseEvent) => {
-      if (document.pointerLockElement) {
-        setYaw(y => y - e.movementX * 0.002);
-        setPitch(p => Math.max(-Math.PI/2.5, Math.min(Math.PI/2.5, p - e.movementY * 0.002)));
+    if (!materialRef.current) {
+      return;
+    }
+
+    materialRef.current.map = textures[2];
+    materialRef.current.needsUpdate = true;
+  }, [textures]);
+
+  const throwCan = () => {
+    if (!body.current || isDead) {
+      return;
+    }
+
+    playThrowSound();
+    lastShootTime.current = Date.now();
+
+    const playerPos = body.current.translation();
+    const playerPosVec = new THREE.Vector3(playerPos.x, playerPos.y, playerPos.z);
+
+    const forward = new THREE.Vector3(0, 0, -1);
+    forward.applyAxisAngle(new THREE.Vector3(1, 0, 0), pitchRef.current);
+    forward.applyAxisAngle(new THREE.Vector3(0, 1, 0), yawRef.current);
+
+    const right = new THREE.Vector3(1, 0, 0).applyAxisAngle(new THREE.Vector3(0, 1, 0), yawRef.current);
+    const up = new THREE.Vector3(0, 1, 0);
+
+    const spawnPos = playerPosVec.clone()
+      .add(up.clone().multiplyScalar(0.75))
+      .add(right.clone().multiplyScalar(0.8))
+      .add(forward.clone().multiplyScalar(1.5));
+
+    socket.emit('shoot', {
+      spawnPos: [spawnPos.x, spawnPos.y, spawnPos.z],
+      velocity: [forward.x * THROW_POWER, forward.y * THROW_POWER, forward.z * THROW_POWER],
+    });
+  };
+
+  useEffect(() => {
+    const handleMouseMove = (event: MouseEvent) => {
+      if (!document.pointerLockElement || isDead) {
+        return;
       }
+
+      setYaw((value) => value - (event.movementX * 0.002));
+      setPitch((value) => Math.max(-Math.PI / 2.5, Math.min(Math.PI / 2.5, value - (event.movementY * 0.002))));
     };
-    
-    const handleMouseUp = (e: MouseEvent) => {
-      if (document.pointerLockElement && e.button === 0 && body.current) {
-        playThrowSound(); // Pew!
-        lastShootTime.current = Date.now(); // Trigger the visual flash
-        
-        const playerPos = body.current.translation();
-        const playerPosVec = new THREE.Vector3(playerPos.x, playerPos.y, playerPos.z);
-        
-        const forward = new THREE.Vector3(0, 0, -1);
-        forward.applyAxisAngle(new THREE.Vector3(1, 0, 0), pitchRef.current);
-        forward.applyAxisAngle(new THREE.Vector3(0, 1, 0), yawRef.current);
-        
-        const right = new THREE.Vector3(1, 0, 0).applyAxisAngle(new THREE.Vector3(0, 1, 0), yawRef.current);
-        const up = new THREE.Vector3(0, 1, 0);
 
-        const spawnPos = playerPosVec.clone()
-            .add(up.clone().multiplyScalar(0.75)) 
-            .add(right.clone().multiplyScalar(0.8)) 
-            .add(forward.clone().multiplyScalar(1.5)); 
-        
-        const velocityArray: [number, number, number] = [forward.x * THROW_POWER, forward.y * THROW_POWER, forward.z * THROW_POWER];
-        const spawnArray: [number, number, number] = [spawnPos.x, spawnPos.y, spawnPos.z];
-
-        throwCan(spawnArray, velocityArray, true);
-        socket.emit('shoot', { spawnPos: spawnArray, velocity: velocityArray });
+    const handleMouseUp = (event: MouseEvent) => {
+      if (!document.pointerLockElement || event.button !== 0 || isDead) {
+        return;
       }
+
+      throwCan();
     };
 
     document.addEventListener('mousemove', handleMouseMove);
@@ -115,55 +116,116 @@ export function Player() {
       document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [throwCan]);
+  }, [isDead]);
+
+  useEffect(() => {
+    const handleSpawnAssigned = ({ id, position }: { id: string; position: [number, number, number] }) => {
+      if (id !== socket.id || !body.current) {
+        return;
+      }
+
+      body.current.setTranslation({ x: position[0], y: position[1], z: position[2] }, true);
+      body.current.setLinvel({ x: 0, y: 0, z: 0 }, true);
+      hasSpawned.current = true;
+    };
+
+    socket.on('spawnAssigned', handleSpawnAssigned);
+    return () => {
+      socket.off('spawnAssigned', handleSpawnAssigned);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!myInfo || !body.current) {
+      return;
+    }
+
+    if (!hasSpawned.current) {
+      body.current.setTranslation({ x: myInfo.position[0], y: myInfo.position[1], z: myInfo.position[2] }, true);
+      body.current.setLinvel({ x: 0, y: 0, z: 0 }, true);
+      hasSpawned.current = true;
+    }
+
+    if (previousAlive.current === null) {
+      previousAlive.current = myInfo.alive;
+      setIsDead(!myInfo.alive);
+      return;
+    }
+
+    if (previousAlive.current && !myInfo.alive) {
+      setIsDead(true);
+    }
+
+    if (!previousAlive.current && myInfo.alive) {
+      body.current.setTranslation({ x: myInfo.position[0], y: myInfo.position[1], z: myInfo.position[2] }, true);
+      body.current.setLinvel({ x: 0, y: 0, z: 0 }, true);
+      setIsDead(false);
+    }
+
+    previousAlive.current = myInfo.alive;
+  }, [myInfo]);
 
   const lastYaw = useRef(yaw);
 
   useFrame((_, delta) => {
-    if (!body.current) return;
-    
+    if (!body.current) {
+      return;
+    }
+
+    const mobile = readMobileControls();
+    if ((mobile.lookX !== 0 || mobile.lookY !== 0) && !isDead) {
+      const nextYaw = yawRef.current - (mobile.lookX * 0.003);
+      const nextPitch = Math.max(-Math.PI / 2.5, Math.min(Math.PI / 2.5, pitchRef.current - (mobile.lookY * 0.003)));
+      yawRef.current = nextYaw;
+      pitchRef.current = nextPitch;
+      setYaw(nextYaw);
+      setPitch(nextPitch);
+    }
+
+    if (mobile.throwRequestId !== lastMobileThrowRequest.current) {
+      lastMobileThrowRequest.current = mobile.throwRequestId;
+      throwCan();
+    }
+
     const { forward, backward, left, right, jump } = getKeys();
     const currentVelocity = body.current.linvel();
     const playerPos = body.current.translation();
 
-    // If dead, lock movement and drop sprite flat to the floor
     if (isDead) {
-       body.current.setLinvel({ x: 0, y: Math.min(0, currentVelocity.y), z: 0 }, true);
-       if (spriteMeshRef.current) {
-          spriteMeshRef.current.rotation.x = THREE.MathUtils.lerp(spriteMeshRef.current.rotation.x, -Math.PI / 2, delta * 15);
-          spriteMeshRef.current.position.y = THREE.MathUtils.lerp(spriteMeshRef.current.position.y, -1.5, delta * 15);
-       }
-       return; // Skip camera update and normal math so we stay looking where we died
+      body.current.setLinvel({ x: 0, y: Math.min(0, currentVelocity.y), z: 0 }, true);
+      if (spriteMeshRef.current) {
+        spriteMeshRef.current.rotation.x = THREE.MathUtils.lerp(spriteMeshRef.current.rotation.x, -Math.PI / 2, delta * 15);
+        spriteMeshRef.current.position.y = THREE.MathUtils.lerp(spriteMeshRef.current.position.y, -3, delta * 15);
+      }
+      return;
     }
 
     const velocity = new THREE.Vector3(0, 0, 0);
-
     if (forward) velocity.z -= 1;
     if (backward) velocity.z += 1;
     if (left) velocity.x -= 1;
     if (right) velocity.x += 1;
+    velocity.x += mobile.moveX;
+    velocity.z -= mobile.moveY;
 
     velocity.normalize().multiplyScalar(SPEED);
-    velocity.applyAxisAngle(new THREE.Vector3(0, 1, 0), yaw); 
-
+    velocity.applyAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
     body.current.setLinvel({ x: velocity.x, y: currentVelocity.y, z: velocity.z }, true);
 
-    if (jump && Math.abs(currentVelocity.y) < 0.1) {
+    if ((jump || mobile.jump) && Math.abs(currentVelocity.y) < 0.1) {
       body.current.setLinvel({ x: currentVelocity.x, y: JUMP_FORCE, z: currentVelocity.z }, true);
     }
-    
-    // Safety Net: If somehow clipping out of map, teleport back up
+
     if (playerPos.y < -15) {
       body.current.setTranslation({ x: 0, y: 10, z: 0 }, true);
       body.current.setLinvel({ x: 0, y: 0, z: 0 }, true);
-      return; 
+      return;
     }
 
     const playerPosVec = new THREE.Vector3(playerPos.x, playerPos.y, playerPos.z);
-    
-    const cameraDistance = 4.0; 
-    const cameraHeight = 1.4; 
-    const shoulderOffset = 1.2; 
+    const cameraDistance = 4;
+    const cameraHeight = 1.4;
+    const shoulderOffset = 1.2;
 
     const camForward = new THREE.Vector3(0, 0, -1);
     camForward.applyAxisAngle(new THREE.Vector3(1, 0, 0), pitch);
@@ -173,95 +235,74 @@ export function Player() {
     const camUp = new THREE.Vector3(0, 1, 0);
 
     const camPos = playerPosVec.clone()
-        .add(camUp.clone().multiplyScalar(cameraHeight))
-        .add(camRight.clone().multiplyScalar(shoulderOffset))
-        .add(camForward.clone().multiplyScalar(-cameraDistance));
+      .add(camUp.clone().multiplyScalar(cameraHeight))
+      .add(camRight.clone().multiplyScalar(shoulderOffset))
+      .add(camForward.clone().multiplyScalar(-cameraDistance));
 
     camera.position.copy(camPos);
-    
-    const aimTarget = camPos.clone().add(camForward.clone().multiplyScalar(100));
-    camera.lookAt(aimTarget);
+    camera.lookAt(camPos.clone().add(camForward.clone().multiplyScalar(100)));
 
-    // Dynamic rotation math
     const yawVelocity = (yaw - lastYaw.current) / (delta || 0.016);
     lastYaw.current = yaw;
 
     let visualHeading = yaw;
-    
-    // Twist shoulders slightly based on input...
     if (left && !backward) visualHeading += Math.PI / 8;
     if (right && !backward) visualHeading -= Math.PI / 8;
 
     const angleDiff = visualHeading - yaw + Math.PI;
-    const normalizedAngle = (angleDiff + Math.PI * 4) % (Math.PI * 2);
-    
+    const normalizedAngle = (angleDiff + (Math.PI * 4)) % (Math.PI * 2);
     let octant = Math.round(normalizedAngle / (Math.PI / 4)) % 8;
 
-    // CLAMP: Do not allow the local player to ever see the Front of their own character (0, 1, 7)
-    // To prevent rapid jitter, just lock to the single side profile based on velocity directly
     if (octant === 0 || octant === 1 || octant === 7) {
-        octant = (left || (!left && !right && velocity.x < 0) || yawVelocity > 0) ? 6 : 2; 
+      octant = (left || (!left && !right && velocity.x < 0) || yawVelocity > 0) ? 6 : 2;
     }
 
-    // Determine the active texture based on octant and shooting state
-    const isShooting = (Date.now() - lastShootTime.current) < 150; // 150ms flash duration
-    let activeTexture = textures[octant];
-    if (isShooting) {
-        activeTexture = shootTexture; // Override with the shoot flash graphic
-    }
-
+    const isShooting = (Date.now() - lastShootTime.current) < 150;
+    const activeTexture = isShooting ? shootTexture : textures[octant];
     if (materialRef.current && materialRef.current.map !== activeTexture) {
       materialRef.current.map = activeTexture;
       materialRef.current.needsUpdate = true;
     }
 
-    // Sync state to 20fps for network performance 
     if (Date.now() - lastSync.current > 50) {
       socket.emit('updateState', {
         position: [playerPos.x, playerPos.y, playerPos.z],
         yaw,
-        pitch
+        pitch,
       });
       lastSync.current = Date.now();
     }
 
-    // Apply the "South Park" style waddle animation
     if (spriteMeshRef.current) {
-      const isMoving = forward || backward || left || right;
+      const isMoving = forward || backward || left || right || Math.abs(mobile.moveX) > 0.05 || Math.abs(mobile.moveY) > 0.05;
       if (isMoving && Math.abs(currentVelocity.y) < 0.1) {
         walkTime.current += delta * 15;
-        // Waddle side to side (tilt)
         spriteMeshRef.current.rotation.z = Math.sin(walkTime.current) * 0.15;
-        // Bob up and down (bounce)
-        spriteMeshRef.current.position.y = Math.abs(Math.sin(walkTime.current)) * 0.2;
+        spriteMeshRef.current.position.y = baseSpriteYOffset + (Math.abs(Math.sin(walkTime.current)) * 0.2);
       } else {
         walkTime.current = 0;
         spriteMeshRef.current.rotation.x = THREE.MathUtils.lerp(spriteMeshRef.current.rotation.x, 0, delta * 15);
         spriteMeshRef.current.rotation.z = THREE.MathUtils.lerp(spriteMeshRef.current.rotation.z, 0, delta * 15);
-        spriteMeshRef.current.position.y = THREE.MathUtils.lerp(spriteMeshRef.current.position.y, 0, delta * 15);
+        spriteMeshRef.current.position.y = THREE.MathUtils.lerp(spriteMeshRef.current.position.y, baseSpriteYOffset, delta * 15);
       }
     }
   });
 
   return (
-    <RigidBody 
-      ref={body} 
-      colliders={false} 
-      mass={1} 
-      type="dynamic" 
-      position={[0, 5, 0]} 
-      lockRotations={true} 
-      ccd={true}
+    <RigidBody
+      ref={body}
+      name="player-local"
+      colliders={false}
+      mass={1}
+      type="dynamic"
+      position={[0, 5, 0]}
+      lockRotations
+      ccd
     >
-      <CapsuleCollider args={[1.25, 0.5]} /> 
-      
-      <Billboard
-        follow={true}
-        lockX={false}
-        lockY={false}
-        lockZ={false} 
-      >
-        <mesh ref={spriteMeshRef} position={[0, 0, 0]}>
+      <CapsuleCollider args={[1.25, 0.5]} />
+
+      <Billboard follow lockX={false} lockY={false} lockZ={false}>
+        <mesh ref={spriteMeshRef} position={[0, baseSpriteYOffset, 0]} frustumCulled={false}>
           <planeGeometry args={[2.5, 3.5]} />
           <meshStandardMaterial ref={materialRef} transparent alphaTest={0.5} side={THREE.DoubleSide} />
         </mesh>

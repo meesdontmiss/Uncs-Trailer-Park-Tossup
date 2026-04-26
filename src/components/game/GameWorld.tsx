@@ -8,8 +8,25 @@ import { CanProjectile } from './CanProjectile';
 import { ImpactEffect } from './ImpactEffect';
 import { NetworkPlayer } from './NetworkPlayer';
 import { useGameStore } from '../../store';
-import { socket } from '../../lib/socket';
-import { playDeathBassSound } from '../../lib/audio';
+import {
+  type ImpactSnapshot,
+  type MatchResult,
+  type PlayerSnapshot,
+  type ProjectileSnapshot,
+} from '../../gameTypes';
+import { playCanImpactSound, playDeathBassSound, playKillSound } from '../../lib/audio';
+import { ensureSocketConnected, socket } from '../../lib/socket';
+
+interface NetworkPlayerState extends PlayerSnapshot {
+  lastShotAt: number | null;
+}
+
+interface MovementUpdate {
+  id: string;
+  position: [number, number, number];
+  yaw: number;
+  pitch: number;
+}
 
 export const keyboardMap = [
   { name: 'forward', keys: ['ArrowUp', 'KeyW'] },
@@ -17,75 +34,222 @@ export const keyboardMap = [
   { name: 'left', keys: ['ArrowLeft', 'KeyA'] },
   { name: 'right', keys: ['ArrowRight', 'KeyD'] },
   { name: 'jump', keys: ['Space'] },
-  { name: 'throw', keys: ['Click'] } 
+  { name: 'throw', keys: ['Click'] },
 ];
 
 export function GameWorld() {
-  const cans = useGameStore(s => s.cans);
-  const impacts = useGameStore(s => s.impacts);
-  const [networkPlayers, setNetworkPlayers] = useState<Record<string, any>>({});
+  const cans = useGameStore((state) => state.cans);
+  const impacts = useGameStore((state) => state.impacts);
+  const registerCan = useGameStore((state) => state.registerCan);
+  const removeCan = useGameStore((state) => state.removeCan);
+  const addImpact = useGameStore((state) => state.addImpact);
+  const setPlayersInfo = useGameStore((state) => state.setPlayersInfo);
+  const setMatchResult = useGameStore((state) => state.setMatchResult);
+  const [networkPlayers, setNetworkPlayers] = useState<Record<string, NetworkPlayerState>>({});
 
   useEffect(() => {
-    socket.on('currentPlayers', setNetworkPlayers);
-    socket.on('playerJoined', (p) => setNetworkPlayers(prev => ({...prev, [p.id]: p})));
-    socket.on('playerLeft', (id) => setNetworkPlayers(prev => { 
-      const n = {...prev}; delete n[id]; return n; 
-    }));
+    const applySnapshot = (players: Record<string, PlayerSnapshot>) => {
+      setPlayersInfo(players);
+      setNetworkPlayers((prev) => {
+        const next: Record<string, NetworkPlayerState> = {};
 
-    socket.on('playerShot', (data) => {
-      useGameStore.getState().throwCan(data.spawnPos, data.velocity, false);
-    });
+        for (const player of Object.values(players)) {
+          next[player.id] = {
+            ...player,
+            lastShotAt: prev[player.id]?.lastShotAt ?? null,
+          };
+        }
 
-    socket.on('playerKilled', (data) => {
-      // Play sub bass kick globally whenever anyone gets dropped
+        return next;
+      });
+    };
+
+    const onCurrentPlayers = (players: Record<string, PlayerSnapshot>) => {
+      applySnapshot(players);
+    };
+
+    const onPlayerJoined = (player: PlayerSnapshot) => {
+      setNetworkPlayers((prev) => ({
+        ...prev,
+        [player.id]: {
+          ...player,
+          lastShotAt: null,
+        },
+      }));
+    };
+
+    const onPlayerLeft = (id: string) => {
+      setNetworkPlayers((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+    };
+
+    const onPlayerMoved = (movement: MovementUpdate) => {
+      setNetworkPlayers((prev) => {
+        const existing = prev[movement.id];
+        if (!existing) {
+          return prev;
+        }
+
+        return {
+          ...prev,
+          [movement.id]: {
+            ...existing,
+            position: movement.position,
+            yaw: movement.yaw,
+            pitch: movement.pitch,
+          },
+        };
+      });
+    };
+
+    const onProjectileSpawn = (projectile: ProjectileSnapshot) => {
+      registerCan(projectile);
+
+      setNetworkPlayers((prev) => {
+        const owner = prev[projectile.ownerId];
+        if (!owner) {
+          return prev;
+        }
+
+        return {
+          ...prev,
+          [projectile.ownerId]: {
+            ...owner,
+            lastShotAt: projectile.spawnedAt,
+          },
+        };
+      });
+    };
+
+    const onProjectileDespawned = ({ projectileId }: { projectileId: string }) => {
+      removeCan(projectileId);
+    };
+
+    const onImpactCreated = (impact: ImpactSnapshot) => {
+      addImpact(impact);
+      playCanImpactSound();
+    };
+
+    const onPlayerKilled = ({ killerId }: { targetId: string; killerId: string }) => {
       playDeathBassSound();
-    });
+      if (killerId === socket.id) {
+        playKillSound();
+      }
+    };
 
-    socket.on('scoreUpdate', (players) => {
-      useGameStore.getState().setPlayersInfo(players);
-    });
+    const onPlayerRespawned = ({ id, position }: { id: string; position: [number, number, number] }) => {
+      setNetworkPlayers((prev) => {
+        const existing = prev[id];
+        if (!existing) {
+          return prev;
+        }
+
+        return {
+          ...prev,
+          [id]: {
+            ...existing,
+            position,
+          },
+        };
+      });
+    };
+
+    const onMatchEnded = (result: MatchResult) => {
+      setMatchResult(result);
+    };
+
+    socket.on('currentPlayers', onCurrentPlayers);
+    socket.on('playerJoined', onPlayerJoined);
+    socket.on('playerLeft', onPlayerLeft);
+    socket.on('playerMoved', onPlayerMoved);
+    socket.on('projectileSpawn', onProjectileSpawn);
+    socket.on('projectileDespawned', onProjectileDespawned);
+    socket.on('impactCreated', onImpactCreated);
+    socket.on('playerKilled', onPlayerKilled);
+    socket.on('playerRespawned', onPlayerRespawned);
+    socket.on('scoreUpdate', applySnapshot);
+    socket.on('matchEnded', onMatchEnded);
+
+    const joinMatch = () => {
+      socket.emit('joinMatch');
+    };
+
+    socket.on('connect', joinMatch);
+    ensureSocketConnected();
+    if (socket.connected) {
+      joinMatch();
+    }
 
     return () => {
-      socket.off('currentPlayers');
-      socket.off('playerJoined');
-      socket.off('playerLeft');
-      socket.off('playerShot');
-      socket.off('playerKilled');
-      socket.off('scoreUpdate');
+      socket.off('connect', joinMatch);
+      socket.off('currentPlayers', onCurrentPlayers);
+      socket.off('playerJoined', onPlayerJoined);
+      socket.off('playerLeft', onPlayerLeft);
+      socket.off('playerMoved', onPlayerMoved);
+      socket.off('projectileSpawn', onProjectileSpawn);
+      socket.off('projectileDespawned', onProjectileDespawned);
+      socket.off('impactCreated', onImpactCreated);
+      socket.off('playerKilled', onPlayerKilled);
+      socket.off('playerRespawned', onPlayerRespawned);
+      socket.off('scoreUpdate', applySnapshot);
+      socket.off('matchEnded', onMatchEnded);
     };
-  }, []);
+  }, [addImpact, registerCan, removeCan, setMatchResult, setPlayersInfo]);
 
   return (
     <KeyboardControls map={keyboardMap}>
       <Canvas shadows camera={{ fov: 75 }}>
-        <Sky sunPosition={[100, 20, 100]} turbidity={0.1} rayleigh={0.5} />
-        <ambientLight intensity={0.5} />
+        <color attach="background" args={['#201714']} />
+        <fog attach="fog" args={['#201714', 55, 145]} />
+        <Sky sunPosition={[-80, 12, -100]} turbidity={1.8} rayleigh={0.7} mieCoefficient={0.012} mieDirectionalG={0.78} />
+        <hemisphereLight args={['#ffbd72', '#273522', 0.65]} />
+        <ambientLight intensity={0.32} />
         <directionalLight
           castShadow
-          position={[10, 20, 10]}
-          intensity={1.5}
+          position={[-28, 30, -18]}
+          color="#ffb15a"
+          intensity={2.2}
           shadow-mapSize={[2048, 2048]}
           shadow-camera-left={-50}
           shadow-camera-right={50}
           shadow-camera-top={50}
           shadow-camera-bottom={-50}
         />
-        
+
         <Suspense fallback={null}>
           <Physics gravity={[0, -20, 0]}>
             <Level />
             <Player />
-            
-            {Object.values(networkPlayers).map(p => {
-              if (p.id === socket.id) return null; // Don't render self here
-              return <NetworkPlayer key={p.id} id={p.id} initialData={p} />
+
+            {Object.values(networkPlayers).map((player) => {
+              if (player.id === socket.id) {
+                return null;
+              }
+
+              return (
+                <NetworkPlayer
+                  key={player.id}
+                  id={player.id}
+                  initialData={player}
+                />
+              );
             })}
 
-            {cans.map(can => (
-              <CanProjectile key={can.id} id={can.id} position={can.position} velocity={can.velocity} isLocal={can.isLocal} />
+            {cans.map((can) => (
+              <CanProjectile
+                key={can.id}
+                id={can.id}
+                ownerId={can.ownerId}
+                position={can.spawnPos}
+                spawnedAt={can.spawnedAt}
+                velocity={can.velocity}
+              />
             ))}
 
-            {impacts.map(impact => (
+            {impacts.map((impact) => (
               <ImpactEffect key={impact.id} id={impact.id} position={impact.position} />
             ))}
           </Physics>

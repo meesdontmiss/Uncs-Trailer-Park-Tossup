@@ -9,7 +9,11 @@ export function ImpactEffect({ id, position }: { id: string; position: [number, 
   const removeImpact = useGameStore(s => s.removeImpact);
   const materialRef = useRef<THREE.MeshStandardMaterial>(null);
   
-  const texture = useMemo(() => new THREE.TextureLoader().load(assets.sprites.IMPACT), []);
+  const texture = useMemo(() => {
+    const loaded = new THREE.TextureLoader().load(assets.sprites.IMPACT);
+    loaded.colorSpace = THREE.SRGBColorSpace;
+    return loaded;
+  }, []);
   const startTime = useMemo(() => Date.now(), []);
 
   useFrame(() => {
@@ -32,10 +36,10 @@ export function ImpactEffect({ id, position }: { id: string; position: [number, 
           ref={materialRef} 
           map={texture} 
           transparent={true} 
-          alphaTest={0.1}
+          alphaTest={0.05}
           side={THREE.DoubleSide} 
           emissive="#7eff00"
-          emissiveIntensity={0.5}
+          emissiveIntensity={0.9}
         />
       </mesh>
     </Billboard>
