@@ -14,7 +14,16 @@ import {
   type PlayerSnapshot,
   type ProjectileSnapshot,
 } from '../../gameTypes';
-import { playCanImpactSound, playDeathBassSound, playKillSound, startGameAmbience, stopGameAmbience } from '../../lib/audio';
+import {
+  playCanImpactSound,
+  playDeathBassSound,
+  playKillSound,
+  startGameAmbience,
+  startGameMusic,
+  stopGameAmbience,
+  stopGameMusic,
+  stopLobbyMusic,
+} from '../../lib/audio';
 import { ensureSocketConnected, socket } from '../../lib/socket';
 
 interface NetworkPlayerState extends PlayerSnapshot {
@@ -48,8 +57,11 @@ export function GameWorld() {
   const [networkPlayers, setNetworkPlayers] = useState<Record<string, NetworkPlayerState>>({});
 
   useEffect(() => {
+    stopLobbyMusic();
+    startGameMusic();
     startGameAmbience();
     return () => {
+      stopGameMusic();
       stopGameAmbience();
     };
   }, []);

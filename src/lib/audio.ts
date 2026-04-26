@@ -1,9 +1,26 @@
-// Procedural audio keeps the game self-contained and avoids missing media files.
-
 let audioCtx: AudioContext | null = null;
-let lobbyMusic: { stop: () => void } | null = null;
+let lobbyMusic: HTMLAudioElement | null = null;
+let shouldPlayLobbyMusic = false;
+let lobbyMusicPlayPending = false;
+let lobbyMusicUnlockHandler: (() => void) | null = null;
+let gameMusic: HTMLAudioElement | null = null;
+let shouldPlayGameMusic = false;
+let gameMusicPlayPending = false;
+let gameMusicUnlockHandler: (() => void) | null = null;
 let gameAmbience: { stop: () => void } | null = null;
 let chargeLoop: { gain: GainNode; osc: OscillatorNode; lfo: OscillatorNode; stop: () => void } | null = null;
+
+const lobbyMusicSrc = '/music/TRAILER PARK UNCS.mp3';
+const gameMusicSrc = '/music/THE UNCTION.mp3';
+
+function removeUnlockHandler(handler: (() => void) | null) {
+  if (!handler) {
+    return;
+  }
+
+  window.removeEventListener('pointerdown', handler);
+  window.removeEventListener('keydown', handler);
+}
 
 function getAudioContext() {
   if (!audioCtx) {
@@ -58,66 +75,127 @@ function playTone({
 }
 
 export function startLobbyMusic() {
-  if (lobbyMusic) {
+  shouldPlayLobbyMusic = true;
+
+  if (!lobbyMusic) {
+    lobbyMusic = new Audio(lobbyMusicSrc);
+    lobbyMusic.loop = true;
+    lobbyMusic.volume = 0.46;
+    lobbyMusic.preload = 'auto';
+  }
+
+  if (!lobbyMusic.paused || lobbyMusicPlayPending) {
     return;
   }
 
-  const ctx = getAudioContext();
-  const master = ctx.createGain();
-  master.gain.value = 0.16;
-  master.connect(ctx.destination);
+  removeUnlockHandler(lobbyMusicUnlockHandler);
+  lobbyMusicUnlockHandler = null;
+  lobbyMusicPlayPending = true;
+  const playPromise = lobbyMusic.play();
+  if (!playPromise) {
+    lobbyMusicPlayPending = false;
+    return;
+  }
 
-  const delay = ctx.createDelay(0.32);
-  const feedback = ctx.createGain();
-  delay.delayTime.value = 0.22;
-  feedback.gain.value = 0.18;
-  delay.connect(feedback);
-  feedback.connect(delay);
-  delay.connect(master);
+  playPromise
+    .then(() => {
+      lobbyMusicPlayPending = false;
+    })
+    .catch(() => {
+      lobbyMusicPlayPending = false;
+      if (!shouldPlayLobbyMusic || lobbyMusicUnlockHandler) {
+        return;
+      }
 
-  const notes = [82.41, 98, 110, 123.47, 110, 98, 92.5, 73.42];
-  let step = 0;
+      lobbyMusicUnlockHandler = () => {
+        const handler = lobbyMusicUnlockHandler;
+        lobbyMusicUnlockHandler = null;
+        removeUnlockHandler(handler);
 
-  const playStep = () => {
-    const now = ctx.currentTime;
-    const bass = ctx.createOscillator();
-    const bassGain = envelopeGain(ctx, 0.36, 0.015, 0.34);
-    bass.type = 'sawtooth';
-    bass.frequency.setValueAtTime(notes[step % notes.length], now);
-    bass.connect(bassGain);
-    bassGain.connect(master);
-    bass.start(now);
-    bass.stop(now + 0.42);
+        if (!shouldPlayLobbyMusic || !lobbyMusic?.paused) {
+          return;
+        }
 
-    if (step % 2 === 0) {
-      const lead = ctx.createOscillator();
-      const leadGain = envelopeGain(ctx, 0.1, 0.01, 0.18);
-      lead.type = 'square';
-      lead.frequency.setValueAtTime(notes[(step + 3) % notes.length] * 4, now + 0.05);
-      lead.connect(leadGain);
-      leadGain.connect(delay);
-      lead.start(now + 0.05);
-      lead.stop(now + 0.24);
-    }
+        startLobbyMusic();
+      };
 
-    step += 1;
-  };
-
-  playStep();
-  const intervalId = window.setInterval(playStep, 360);
-
-  lobbyMusic = {
-    stop: () => {
-      window.clearInterval(intervalId);
-      master.gain.setTargetAtTime(0.0001, ctx.currentTime, 0.08);
-      window.setTimeout(() => master.disconnect(), 250);
-    },
-  };
+      window.addEventListener('pointerdown', lobbyMusicUnlockHandler, { once: true });
+      window.addEventListener('keydown', lobbyMusicUnlockHandler, { once: true });
+    });
 }
 
 export function stopLobbyMusic() {
-  lobbyMusic?.stop();
-  lobbyMusic = null;
+  shouldPlayLobbyMusic = false;
+  removeUnlockHandler(lobbyMusicUnlockHandler);
+  lobbyMusicUnlockHandler = null;
+
+  if (!lobbyMusic || lobbyMusic.paused) {
+    return;
+  }
+
+  lobbyMusic.pause();
+}
+
+export function startGameMusic() {
+  shouldPlayGameMusic = true;
+
+  if (!gameMusic) {
+    gameMusic = new Audio(gameMusicSrc);
+    gameMusic.loop = true;
+    gameMusic.volume = 0.5;
+    gameMusic.preload = 'auto';
+  }
+
+  if (!gameMusic.paused || gameMusicPlayPending) {
+    return;
+  }
+
+  removeUnlockHandler(gameMusicUnlockHandler);
+  gameMusicUnlockHandler = null;
+  gameMusicPlayPending = true;
+  const playPromise = gameMusic.play();
+  if (!playPromise) {
+    gameMusicPlayPending = false;
+    return;
+  }
+
+  playPromise
+    .then(() => {
+      gameMusicPlayPending = false;
+    })
+    .catch(() => {
+      gameMusicPlayPending = false;
+      if (!shouldPlayGameMusic || gameMusicUnlockHandler) {
+        return;
+      }
+
+      gameMusicUnlockHandler = () => {
+        const handler = gameMusicUnlockHandler;
+        gameMusicUnlockHandler = null;
+        removeUnlockHandler(handler);
+
+        if (!shouldPlayGameMusic || !gameMusic?.paused) {
+          return;
+        }
+
+        startGameMusic();
+      };
+
+      window.addEventListener('pointerdown', gameMusicUnlockHandler, { once: true });
+      window.addEventListener('keydown', gameMusicUnlockHandler, { once: true });
+    });
+}
+
+export function stopGameMusic() {
+  shouldPlayGameMusic = false;
+  removeUnlockHandler(gameMusicUnlockHandler);
+  gameMusicUnlockHandler = null;
+
+  if (!gameMusic || gameMusic.paused) {
+    return;
+  }
+
+  gameMusic.pause();
 }
 
 export function startGameAmbience() {
@@ -196,6 +274,17 @@ export function playCanImpactSound() {
   osc2.start();
   osc1.stop(ctx.currentTime + 0.2);
   osc2.stop(ctx.currentTime + 0.2);
+}
+
+export function playLobbyJoinPing() {
+  playTone({ type: 'sine', frequency: 740, endFrequency: 980, duration: 0.09, gain: 0.08 });
+  playTone({ type: 'triangle', frequency: 1240, duration: 0.08, gain: 0.045, delay: 0.045 });
+}
+
+export function playMatchStartAlert() {
+  playTone({ type: 'square', frequency: 880, duration: 0.16, gain: 0.18 });
+  playTone({ type: 'square', frequency: 880, duration: 0.16, gain: 0.18, delay: 0.24 });
+  playTone({ type: 'triangle', frequency: 1320, endFrequency: 660, duration: 0.34, gain: 0.16, delay: 0.5 });
 }
 
 export function playKillSound() {

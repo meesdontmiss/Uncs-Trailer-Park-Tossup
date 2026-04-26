@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: uncs-trailer-park-tossup
+    runtime: node
+    plan: starter
+    buildCommand: npm ci --force && npm run build
+    startCommand: npm run start
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DB_AUTO_MIGRATE
+        value: "true"
+      - key: DATABASE_URL
+        sync: false

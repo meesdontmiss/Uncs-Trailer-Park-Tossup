@@ -19,12 +19,22 @@ import {
   type ProjectileSnapshot,
   type Vec3,
 } from './src/gameTypes';
+import {
+  createMatch,
+  finishMatchRecord,
+  initDatabase,
+  isDatabaseEnabled,
+  markPlayerLeft,
+  recordEvent,
+  recordProjectile,
+  resolveProjectileRecord,
+  saveProfile,
+  updatePlayerStats,
+  upsertMatchPlayer,
+  type PersistedProfile,
+} from './src/serverDb';
 
-interface LobbyProfile {
-  walletAddress: string | null;
-  username: string;
-  pfp: string;
-}
+interface LobbyProfile extends PersistedProfile {}
 
 interface ServerPlayer extends PlayerSnapshot {
   lastShotAt: number;
@@ -43,6 +53,33 @@ const projectiles = new Map<string, ServerProjectile>();
 const lobbySelections = new Map<string, { wager: string; joinedAt: number }>();
 const lobbyProfiles = new Map<string, LobbyProfile>();
 let matchResult: MatchResult | null = null;
+let activeMatchId: string | null = null;
+
+function defaultProfileForSocket(socketId: string): LobbyProfile {
+  return {
+    id: null,
+    walletAddress: null,
+    username: `Player_${socketId.slice(0, 4)}`,
+    pfp: '🥫',
+  };
+}
+
+function getProfile(socketId: string) {
+  return lobbyProfiles.get(socketId) ?? defaultProfileForSocket(socketId);
+}
+
+function eventActor(socketId: string) {
+  return {
+    ...getProfile(socketId),
+    socketId,
+  };
+}
+
+function persist(task: Promise<unknown>) {
+  task.catch((error) => {
+    console.error('[db] async persistence failed', error);
+  });
+}
 
 function parseBuyInUnc(wager: string) {
   if (wager === 'FREE') {
@@ -329,11 +366,18 @@ function emitPlayers(io: Server) {
 
 function resetArena(io: Server) {
   matchResult = null;
+  activeMatchId = null;
   clearProjectiles(io);
 }
 
 function finishMatch(io: Server, result: MatchResult) {
   matchResult = result;
+  persist(recordEvent(activeMatchId, 'matchEnded', result));
+  persist(finishMatchRecord(activeMatchId, {
+    result,
+    players: Object.values(players),
+    getProfile,
+  }));
   clearProjectiles(io);
   io.emit('matchEnded', result);
   emitPlayers(io);
@@ -382,6 +426,14 @@ function handleValidHit(io: Server, ownerId: string, targetId: string, impactPos
   });
 
   if (target.health > 0) {
+    persist(updatePlayerStats(activeMatchId, target));
+    persist(recordEvent(
+      activeMatchId,
+      'playerDamaged',
+      { damage, impactPosition, chargePower },
+      eventActor(ownerId),
+      eventActor(targetId),
+    ));
     emitPlayers(io);
     return;
   }
@@ -393,6 +445,15 @@ function handleValidHit(io: Server, ownerId: string, targetId: string, impactPos
   target.respawnAt = null;
 
   io.emit('playerKilled', { targetId, killerId: ownerId });
+  persist(updatePlayerStats(activeMatchId, owner));
+  persist(updatePlayerStats(activeMatchId, target));
+  persist(recordEvent(
+    activeMatchId,
+    'playerKilled',
+    { damage, impactPosition, chargePower },
+    eventActor(ownerId),
+    eventActor(targetId),
+  ));
 
   if (maybeFinishLastStanding(io)) {
     return;
@@ -449,6 +510,12 @@ function findProjectileImpact(projectile: ServerProjectile, start: Vec3, end: Ve
 function resolveProjectile(io: Server, projectile: ServerProjectile, impact: { position: Vec3; targetId: string | null }) {
   projectile.resolved = true;
   despawnProjectile(io, projectile.id);
+  persist(resolveProjectileRecord(
+    activeMatchId,
+    projectile.id,
+    impact.position,
+    impact.targetId ? eventActor(impact.targetId) : undefined,
+  ));
 
   if (impact.targetId) {
     handleValidHit(io, projectile.ownerId, impact.targetId, impact.position, projectile.chargePower);
@@ -462,13 +529,44 @@ function resolveProjectile(io: Server, projectile: ServerProjectile, impact: { p
     ownerId: projectile.ownerId,
     targetId: null,
   });
+  persist(recordEvent(
+    activeMatchId,
+    'projectileImpact',
+    { impactPosition: impact.position },
+    eventActor(projectile.ownerId),
+    undefined,
+    projectile.id,
+  ));
 }
 
 async function startServer() {
+  await initDatabase();
   const app = express();
   const httpServer = createServer(app);
   const io = new Server(httpServer, {
     cors: { origin: '*' },
+  });
+
+  app.get('/health', (_req, res) => {
+    res.json({
+      ok: true,
+      port: PORT,
+      database: isDatabaseEnabled() ? 'enabled' : 'disabled',
+      activeMatchId,
+      players: Object.keys(players).length,
+      projectiles: projectiles.size,
+    });
+  });
+
+  app.get('/api/status', (_req, res) => {
+    res.json({
+      ok: true,
+      databaseEnabled: isDatabaseEnabled(),
+      activeMatchId,
+      playerCount: Object.keys(players).length,
+      lobbyRooms: snapshotLobbyRooms(),
+      matchResult,
+    });
   });
 
   const cleanupInterval = setInterval(() => {
@@ -512,16 +610,18 @@ async function startServer() {
   io.on('connection', (socket) => {
     console.log('Socket connected:', socket.id);
     socket.emit('lobbyRooms', snapshotLobbyRooms());
+    persist(recordEvent(activeMatchId, 'socketConnected', { socketId: socket.id }, eventActor(socket.id)));
 
     socket.on('selectLobby', (wager: string) => {
       lobbySelections.set(socket.id, {
         wager,
         joinedAt: lobbySelections.get(socket.id)?.joinedAt ?? Date.now(),
       });
+      persist(recordEvent(activeMatchId, 'lobbySelected', { wager }, eventActor(socket.id)));
       emitLobbyRooms(io);
     });
 
-    socket.on('saveProfile', (profile: Partial<LobbyProfile>) => {
+    socket.on('saveProfile', async (profile: Partial<LobbyProfile>) => {
       const username = typeof profile.username === 'string'
         ? profile.username.trim().slice(0, 18)
         : '';
@@ -532,15 +632,23 @@ async function startServer() {
         ? profile.walletAddress
         : null;
 
-      lobbyProfiles.set(socket.id, {
+      const persistedProfile = await saveProfile(socket.id, {
         walletAddress,
         username: username || `Player_${socket.id.slice(0, 4)}`,
         pfp: pfp || '🥫',
       });
+      lobbyProfiles.set(socket.id, persistedProfile);
+      if (players[socket.id]) {
+        persist(upsertMatchPlayer(activeMatchId, {
+          socketId: socket.id,
+          profile: persistedProfile,
+          player: players[socket.id],
+        }));
+      }
       emitLobbyRooms(io);
     });
 
-    socket.on('joinMatch', () => {
+    socket.on('joinMatch', async () => {
       if (!lobbySelections.has(socket.id)) {
         lobbySelections.set(socket.id, { wager: 'FREE', joinedAt: Date.now() });
         emitLobbyRooms(io);
@@ -550,11 +658,34 @@ async function startServer() {
         resetArena(io);
       }
 
+      const selection = lobbySelections.get(socket.id);
+      const wager = selection?.wager ?? 'FREE';
+      const buyInUnc = parseBuyInUnc(wager);
+      if (buyInUnc > 0 && !getProfile(socket.id).walletAddress) {
+        socket.emit('joinMatchRejected', {
+          reason: 'walletRequired',
+          message: 'Connect a wallet and confirm the entry fee before joining this wager room.',
+          wager,
+        });
+        return;
+      }
+
       if (!players[socket.id]) {
         players[socket.id] = createPlayer(socket.id);
       }
 
       const player = players[socket.id];
+      if (!activeMatchId && !matchResult) {
+        activeMatchId = await createMatch(wager, buyInUnc);
+        persist(recordEvent(activeMatchId, 'matchStarted', { wager, databaseEnabled: isDatabaseEnabled() }));
+      }
+      persist(upsertMatchPlayer(activeMatchId, {
+        socketId: socket.id,
+        profile: getProfile(socket.id),
+        player,
+      }));
+      persist(recordEvent(activeMatchId, 'playerJoined', { position: player.position, wager }, eventActor(socket.id)));
+
       socket.emit('currentPlayers', snapshotPlayers());
       socket.emit('scoreUpdate', snapshotPlayers());
       socket.emit('spawnAssigned', { id: player.id, position: player.position });
@@ -583,6 +714,7 @@ async function startServer() {
       if (typeof state.pitch === 'number') {
         player.pitch = state.pitch;
       }
+      persist(updatePlayerStats(activeMatchId, player));
 
       socket.broadcast.emit('playerMoved', {
         id: player.id,
@@ -617,11 +749,21 @@ async function startServer() {
       };
 
       projectiles.set(projectile.id, projectile);
+      persist(recordProjectile(activeMatchId, snapshotProjectile(projectile), getProfile(socket.id)));
+      persist(recordEvent(
+        activeMatchId,
+        'projectileSpawned',
+        { spawnPos: projectile.spawnPos, velocity: projectile.velocity, chargePower: projectile.chargePower },
+        eventActor(socket.id),
+        undefined,
+        projectile.id,
+      ));
       io.emit('projectileSpawn', snapshotProjectile(projectile));
     });
 
     socket.on('disconnect', () => {
       console.log('Socket disconnected:', socket.id);
+      const leavingActor = eventActor(socket.id);
 
       if (!players[socket.id]) {
         return;
@@ -630,9 +772,12 @@ async function startServer() {
       delete players[socket.id];
       lobbySelections.delete(socket.id);
       lobbyProfiles.delete(socket.id);
+      persist(markPlayerLeft(activeMatchId, socket.id));
+      persist(recordEvent(activeMatchId, 'playerDisconnected', { socketId: socket.id }, leavingActor));
 
       for (const [projectileId, projectile] of projectiles.entries()) {
         if (projectile.ownerId === socket.id) {
+          persist(resolveProjectileRecord(activeMatchId, projectileId));
           despawnProjectile(io, projectileId);
         }
       }
@@ -656,10 +801,6 @@ async function startServer() {
     app.use(express.static(distPath));
     app.get('*', (_req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
-    });
-  } else {
-    app.get('/health', (_req, res) => {
-      res.json({ ok: true, port: PORT });
     });
   }
 

@@ -6,6 +6,7 @@ import {
   Crosshair,
   ExternalLink,
   Gamepad2,
+  Lock,
   MapPinned,
   Play,
   RadioTower,
@@ -14,14 +15,14 @@ import {
   Wallet,
 } from 'lucide-react';
 import { HOUSE_FEE_RATE } from './gameTypes';
-import { startLobbyMusic, stopGameAmbience, stopLobbyMusic } from './lib/audio';
+import { playLobbyJoinPing, playMatchStartAlert, startLobbyMusic, stopGameAmbience } from './lib/audio';
 import { disconnectSocket, ensureSocketConnected, socket } from './lib/socket';
 import { useGameStore } from './store';
 
 const GameExperience = lazy(() => import('./components/game/GameExperience'));
 
 const titleHero = '/assets/game/title-hero.png';
-const lobbyParkSign = '/assets/game/lobby-park-sign.png';
+const blankParkSign = '/assets/game/blank-park-sign.png';
 const navCanLogo = '/assets/game/nav-can-logo.png';
 const uncTokenAddress = 'ACtfUWtgvaXrQGNMiohTusi5jcx5RJf5zwu9aAxkpump';
 const uncDexscreenerUrl = 'https://dexscreener.com/solana/bwfzkx1pmpvwxammwtrizvowzzzgifeyuyw6ee51shly';
@@ -88,6 +89,7 @@ function getSolanaProvider() {
 }
 
 type MenuView = 'START' | 'LOBBY';
+type LobbyNotice = { tone: 'info' | 'warning' | 'success'; message: string } | null;
 
 function BrandMark() {
   return (
@@ -369,6 +371,30 @@ function StartScreen({
   );
 }
 
+function LobbyBillboard() {
+  return (
+    <div className="relative w-full max-w-[30rem] overflow-visible lg:ml-6">
+      <div className="relative aspect-square w-full">
+        <img
+          src={blankParkSign}
+          alt=""
+          className="pointer-events-none absolute inset-0 h-full w-full object-contain drop-shadow-[0_22px_26px_rgba(0,0,0,0.62)]"
+          draggable={false}
+        />
+        <div className="absolute left-[15%] top-[16%] flex h-[38%] w-[70%] flex-col items-center justify-center px-4 text-center">
+          <h1 className="font-pixel text-[clamp(2.9rem,5vw,4.9rem)] uppercase leading-[0.82] text-[#16120d] drop-shadow-[0_2px_0_rgba(255,255,255,0.28)]">
+            Trailer Park
+            <span className="block text-monster drop-shadow-[0_2px_0_rgba(20,35,0,0.85)]">Throwdown</span>
+          </h1>
+        </div>
+      </div>
+      <p className="-mt-5 max-w-md font-mono text-sm leading-7 text-white/78 sm:-mt-6 lg:ml-7">
+        Pick a free table or load a $UNC wager room before you step into the park.
+      </p>
+    </div>
+  );
+}
+
 function LobbyScreen({
   onBack,
   onStartGame,
@@ -387,6 +413,9 @@ function LobbyScreen({
   const wager = useGameStore((state) => state.wager);
   const setWager = useGameStore((state) => state.setWager);
   const [profileDraft, setProfileDraft] = useState(defaultProfile);
+  const [paidWagers, setPaidWagers] = useState<Record<string, boolean>>({});
+  const [notice, setNotice] = useState<LobbyNotice>(null);
+  const selectedPlayerCountRef = useRef(0);
   const selectedRoom = lobbyRooms.find((room) => room.wager === wager);
   const selectedPlayers = selectedRoom?.players ?? [];
   const selectedTier = wagerTiers.find((tier) => tier.value === wager) ?? wagerTiers[0];
@@ -394,6 +423,9 @@ function LobbyScreen({
   const selectedGrossPotUnc = selectedBuyInUnc * selectedPlayers.length;
   const selectedHouseFeeUnc = selectedGrossPotUnc * HOUSE_FEE_RATE;
   const selectedPayoutPoolUnc = selectedGrossPotUnc - selectedHouseFeeUnc;
+  const isPaidRoom = selectedBuyInUnc > 0;
+  const hasWallet = Boolean(profile.walletAddress);
+  const hasPaidSelectedEntry = !isPaidRoom || Boolean(paidWagers[wager]);
 
   useEffect(() => {
     setProfileDraft(profile);
@@ -412,6 +444,14 @@ function LobbyScreen({
     };
   }, [profile, setLobbyRooms, wager]);
 
+  useEffect(() => {
+    if (selectedPlayers.length > selectedPlayerCountRef.current) {
+      playLobbyJoinPing();
+    }
+
+    selectedPlayerCountRef.current = selectedPlayers.length;
+  }, [selectedPlayers.length, wager]);
+
   const handleSaveProfile = () => {
     const nextProfile = {
       walletAddress: profile.walletAddress,
@@ -425,40 +465,63 @@ function LobbyScreen({
   };
 
   const handleSelectWager = (value: string) => {
+    const buyInUnc = parseBuyInUnc(value);
+    playLobbyJoinPing();
     setWager(value);
+    setNotice(buyInUnc > 0
+      ? { tone: 'warning', message: `Connect a wallet and confirm ${formatUnc(buyInUnc)} before readying in this room.` }
+      : { tone: 'success', message: 'Free room selected. No wallet or entry fee required.' });
     ensureSocketConnected();
     socket.emit('selectLobby', value);
   };
 
+  const handleUseFreeRoom = () => {
+    handleSelectWager('FREE');
+  };
+
+  const handleConfirmEntry = () => {
+    if (!hasWallet) {
+      setNotice({ tone: 'warning', message: 'Connect your wallet before paying an entry fee.' });
+      void onConnectWallet();
+      return;
+    }
+
+    setPaidWagers((current) => ({ ...current, [wager]: true }));
+    setNotice({ tone: 'success', message: `${selectedTier.buyIn} entry confirmed. You can ready up now.` });
+    playLobbyJoinPing();
+  };
+
+  const handleReadyUp = () => {
+    if (isPaidRoom && !hasWallet) {
+      setNotice({ tone: 'warning', message: 'Paid rooms require a connected wallet. You can connect or jump into the free room.' });
+      return;
+    }
+
+    if (isPaidRoom && !hasPaidSelectedEntry) {
+      setNotice({ tone: 'warning', message: `Pay the ${selectedTier.buyIn} entry fee before readying up, or use the free room.` });
+      return;
+    }
+
+    setNotice(null);
+    onStartGame();
+  };
+
   return (
-    <div className="h-screen overflow-hidden bg-[#15120f] text-white">
+    <div className="min-h-screen overflow-y-auto bg-[#15120f] text-white lg:h-screen lg:overflow-hidden">
       <div
-        className="h-screen bg-cover bg-center"
+        className="min-h-screen bg-cover bg-center lg:h-screen"
         style={{
           backgroundImage: `linear-gradient(180deg, rgba(10,8,6,0.82), rgba(10,8,6,0.95)), url("${titleHero}")`,
         }}
       >
-        <div className="flex h-screen w-full flex-col">
+        <div className="flex min-h-screen w-full flex-col lg:h-screen">
           <UniversalNav currentView="LOBBY" onStart={onBack} profile={profile} onConnectWallet={onConnectWallet} />
 
-          <main className="mx-auto grid min-h-0 w-full max-w-7xl flex-1 items-start gap-5 px-5 py-4 sm:px-8 lg:grid-cols-[1.05fr_0.95fr] lg:px-12">
-            <section>
-              <div className="relative isolate max-w-xl py-5 lg:px-10">
-                <img
-                  src={lobbyParkSign}
-                  alt=""
-                  className="pointer-events-none absolute -left-8 -top-20 z-0 hidden w-[28rem] rotate-[-2deg] opacity-95 lg:block"
-                />
-                <h1 className="relative z-10 font-pixel text-6xl uppercase leading-none text-white drop-shadow-[0_4px_0_rgba(0,0,0,0.65)] sm:text-8xl">
-                  Trailer Park
-                  <span className="block text-monster">Throwdown</span>
-                </h1>
-                <p className="relative z-10 mt-5 max-w-md font-mono text-sm leading-7 text-white/78">
-                  Pick a free table or load a $UNC wager room before you step into the park.
-                </p>
-              </div>
+          <main className="mx-auto grid min-h-0 w-full max-w-7xl flex-1 items-start gap-5 px-5 pb-6 pt-8 sm:px-8 lg:grid-cols-[1.05fr_0.95fr] lg:px-12 lg:pt-10">
+            <section className="min-w-0">
+              <LobbyBillboard />
 
-              <div className="mt-3 grid max-w-2xl gap-3 sm:grid-cols-3">
+              <div className="mt-5 grid max-w-2xl gap-3 sm:grid-cols-3 lg:mt-7">
                 <div className="rounded border border-white/12 bg-white/[0.06] p-4">
                   <MapPinned className="mb-3 text-monster" size={22} />
                   <div className="font-pixel text-3xl uppercase">Trailer Lane</div>
@@ -481,7 +544,7 @@ function LobbyScreen({
               </div>
             </section>
 
-            <aside className="rounded border border-white/12 bg-black/45 p-4 shadow-2xl backdrop-blur-md">
+            <aside className="rounded border border-white/12 bg-black/45 p-4 shadow-2xl backdrop-blur-md lg:mt-12">
               <div className="mb-3 flex items-center justify-between gap-3 border-b border-white/10 pb-3">
                 <div>
                   <div className="font-pixel text-4xl uppercase text-white">Match Rooms</div>
@@ -489,6 +552,19 @@ function LobbyScreen({
                 </div>
                 <Users className="text-monster" size={28} />
               </div>
+
+              {notice && (
+                <div className={`mb-3 rounded border px-3 py-2 font-mono text-xs uppercase tracking-[0.12em] ${
+                  notice.tone === 'success'
+                    ? 'border-monster/40 bg-monster/10 text-monster'
+                    : notice.tone === 'warning'
+                      ? 'border-yellow-300/35 bg-yellow-300/10 text-yellow-100'
+                      : 'border-white/15 bg-white/[0.06] text-white/70'
+                }`}
+                >
+                  {notice.message}
+                </div>
+              )}
 
               <div className="mb-3 grid gap-3 rounded border border-white/10 bg-black/35 p-3 md:grid-cols-[auto_1fr_auto]">
                 <div className="flex h-14 w-14 items-center justify-center rounded border border-monster/35 bg-monster/10 text-3xl">
@@ -557,6 +633,46 @@ function LobbyScreen({
                   </div>
                 </div>
 
+                <div className={`mb-3 rounded border p-3 ${isPaidRoom ? 'border-yellow-300/25 bg-yellow-300/10' : 'border-monster/25 bg-monster/10'}`}>
+                  <div className="mb-2 flex items-center justify-between gap-3">
+                    <div>
+                      <div className="font-pixel text-2xl uppercase text-white">{isPaidRoom ? 'Wager Gate' : 'Open Practice'}</div>
+                      <div className="font-mono text-[10px] uppercase tracking-[0.16em] text-white/45">
+                        {isPaidRoom ? 'Wallet and entry fee required to ready' : 'No wallet required'}
+                      </div>
+                    </div>
+                    {isPaidRoom ? <Lock className="text-yellow-300" size={22} /> : <Check className="text-monster" size={22} />}
+                  </div>
+                  {isPaidRoom ? (
+                    <div className="grid gap-2 sm:grid-cols-[1fr_auto_auto]">
+                      <div className="rounded border border-white/10 bg-black/25 px-3 py-2 font-mono text-xs text-white/70">
+                        {hasWallet
+                          ? `${profile.walletAddress?.slice(0, 4)}...${profile.walletAddress?.slice(-4)} connected`
+                          : 'Connect wallet before paying'}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={hasWallet ? handleConfirmEntry : onConnectWallet}
+                        className="inline-flex items-center justify-center gap-2 rounded border border-yellow-300/35 bg-yellow-300/15 px-3 py-2 font-mono text-xs uppercase tracking-[0.12em] text-yellow-100 transition hover:bg-yellow-300/25"
+                      >
+                        <Wallet size={14} />
+                        {hasWallet ? (hasPaidSelectedEntry ? 'Paid' : `Pay ${selectedTier.buyIn}`) : 'Connect'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleUseFreeRoom}
+                        className="rounded border border-white/15 bg-white/[0.05] px-3 py-2 font-mono text-xs uppercase tracking-[0.12em] text-white/70 transition hover:bg-white/10 hover:text-white"
+                      >
+                        Free Room
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="font-mono text-xs uppercase tracking-[0.12em] text-white/65">
+                      Ready up any time, or connect a wallet first if you want your profile tied to an address.
+                    </div>
+                  )}
+                </div>
+
                 <div className="grid gap-2 sm:grid-cols-2">
                   {selectedPlayers.length === 0 && (
                     <div className="rounded border border-dashed border-white/15 bg-white/[0.04] px-4 py-3 text-center font-mono text-sm text-white/45 sm:col-span-2">
@@ -598,11 +714,15 @@ function LobbyScreen({
               </div>
 
               <button
-                onClick={onStartGame}
-                className="mt-6 inline-flex w-full items-center justify-center gap-3 rounded bg-monster px-6 py-4 font-pixel text-3xl uppercase leading-none text-black transition hover:bg-monster-dark"
+                onClick={handleReadyUp}
+                className={`mt-6 inline-flex w-full items-center justify-center gap-3 rounded px-6 py-4 font-pixel text-3xl uppercase leading-none transition ${
+                  isPaidRoom && !hasPaidSelectedEntry
+                    ? 'bg-yellow-300 text-black hover:bg-yellow-200'
+                    : 'bg-monster text-black hover:bg-monster-dark'
+                }`}
               >
                 <Gamepad2 size={24} />
-                Play {wager === 'FREE' ? 'Free' : wager}
+                {isPaidRoom && !hasPaidSelectedEntry ? `Ready Requires ${selectedTier.buyIn}` : `Ready ${wager === 'FREE' ? 'Free' : wager}`}
               </button>
             </aside>
           </main>
@@ -732,6 +852,12 @@ export default function App() {
   const startGame = useGameStore((state) => state.startGame);
   const endGame = useGameStore((state) => state.endGame);
 
+  useEffect(() => {
+    if (status === 'LOBBY') {
+      startLobbyMusic();
+    }
+  }, [status]);
+
   const handleConnectWallet = async () => {
     const provider = getSolanaProvider();
     if (!provider) {
@@ -774,7 +900,7 @@ export default function App() {
   }, [endGame]);
 
   const handleStartGame = () => {
-    stopLobbyMusic();
+    playMatchStartAlert();
     stopGameAmbience();
     ensureSocketConnected();
     startTransition(() => {
@@ -792,7 +918,6 @@ export default function App() {
   };
 
   const handleBackToStart = () => {
-    stopLobbyMusic();
     setMenuView('START');
   };
 
