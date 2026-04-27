@@ -20,12 +20,15 @@ import {
   type Vec3,
 } from './src/gameTypes';
 import {
+  abandonMatchRecord,
   createMatch,
   finishMatchRecord,
   initDatabase,
   isDatabaseEnabled,
   markPlayerLeft,
+  recordEntryPayment,
   recordEvent,
+  recordPayoutSettlement,
   recordProjectile,
   resolveProjectileRecord,
   saveProfile,
@@ -62,6 +65,7 @@ const lobbyProfiles = new Map<string, LobbyProfile>();
 const entryPayments = new Map<string, EntryPaymentReceipt>();
 let matchResult: MatchResult | null = null;
 let activeMatchId: string | null = null;
+let activeMatchCreatePromise: Promise<string | null> | null = null;
 
 function defaultProfileForSocket(socketId: string): LobbyProfile {
   return {
@@ -87,6 +91,24 @@ function persist(task: Promise<unknown>) {
   task.catch((error) => {
     console.error('[db] async persistence failed', error);
   });
+}
+
+async function ensureActiveMatch(wager: string, buyInUnc: number) {
+  if (activeMatchId || matchResult) {
+    return activeMatchId;
+  }
+
+  activeMatchCreatePromise ??= createMatch(wager, buyInUnc)
+    .then((matchId) => {
+      activeMatchId = matchId;
+      persist(recordEvent(activeMatchId, 'matchStarted', { wager, databaseEnabled: isDatabaseEnabled() }));
+      return matchId;
+    })
+    .finally(() => {
+      activeMatchCreatePromise = null;
+    });
+
+  return activeMatchCreatePromise;
 }
 
 function parseBuyInUnc(wager: string) {
@@ -376,13 +398,15 @@ function emitPlayers(io: Server) {
 function resetArena(io: Server) {
   matchResult = null;
   activeMatchId = null;
+  activeMatchCreatePromise = null;
   clearProjectiles(io);
 }
 
 function finishMatch(io: Server, result: MatchResult) {
   matchResult = result;
   const matchId = activeMatchId;
-  const winnerWalletAddress = result.winnerId ? getProfile(result.winnerId).walletAddress : null;
+  const winnerProfile = result.winnerId ? getProfile(result.winnerId) : undefined;
+  const winnerWalletAddress = winnerProfile?.walletAddress ?? null;
   persist(recordEvent(matchId, 'matchEnded', result));
   persist(finishMatchRecord(matchId, {
     result,
@@ -394,7 +418,10 @@ function finishMatch(io: Server, result: MatchResult) {
     grossPotUnc: result.grossPotUnc,
     houseFeeUnc: result.houseFeeUnc,
     payoutPoolUnc: result.payoutPoolUnc,
-  }).then((settlement) => recordEvent(matchId, 'payoutSettlement', settlement)));
+  }).then(async (settlement) => {
+    await recordPayoutSettlement(matchId, result, winnerProfile, settlement);
+    await recordEvent(matchId, 'payoutSettlement', settlement);
+  }));
   clearProjectiles(io);
   io.emit('matchEnded', result);
   emitPlayers(io);
@@ -690,6 +717,7 @@ async function startServer() {
 
       if (result.ok && result.receipt) {
         entryPayments.set(socket.id, result.receipt);
+        persist(recordEntryPayment(activeMatchId, socket.id, profile, result.receipt));
         persist(recordEvent(activeMatchId, 'entryPaymentVerified', result.receipt, eventActor(socket.id)));
         emitLobbyRooms(io);
       }
@@ -759,10 +787,7 @@ async function startServer() {
       }
 
       const player = players[socket.id];
-      if (!activeMatchId && !matchResult) {
-        activeMatchId = await createMatch(wager, buyInUnc);
-        persist(recordEvent(activeMatchId, 'matchStarted', { wager, databaseEnabled: isDatabaseEnabled() }));
-      }
+      await ensureActiveMatch(wager, buyInUnc);
       persist(upsertMatchPlayer(activeMatchId, {
         socketId: socket.id,
         profile: getProfile(socket.id),
@@ -845,7 +870,7 @@ async function startServer() {
       io.emit('projectileSpawn', snapshotProjectile(projectile));
     });
 
-    socket.on('disconnect', () => {
+    socket.on('disconnect', async () => {
       console.log('Socket disconnected:', socket.id);
       const leavingActor = eventActor(socket.id);
 
@@ -853,12 +878,19 @@ async function startServer() {
         return;
       }
 
+      const projectedRemainingPlayers = Object.values(players).filter((player) => player.id !== socket.id);
+      const shouldFinishForfeit = !matchResult && projectedRemainingPlayers.length === 1 && Object.keys(players).length >= 2;
+      await markPlayerLeft(activeMatchId, socket.id);
+      await recordEvent(activeMatchId, 'playerDisconnected', { socketId: socket.id }, leavingActor);
+
+      if (shouldFinishForfeit) {
+        finishMatch(io, buildMatchResult(projectedRemainingPlayers[0].id, 'forfeit'));
+      }
+
       delete players[socket.id];
       lobbySelections.delete(socket.id);
       lobbyProfiles.delete(socket.id);
       entryPayments.delete(socket.id);
-      persist(markPlayerLeft(activeMatchId, socket.id));
-      persist(recordEvent(activeMatchId, 'playerDisconnected', { socketId: socket.id }, leavingActor));
 
       for (const [projectileId, projectile] of projectiles.entries()) {
         if (projectile.ownerId === socket.id) {
@@ -871,9 +903,10 @@ async function startServer() {
       emitLobbyRooms(io);
 
       const remainingPlayers = Object.values(players);
-      if (!matchResult && remainingPlayers.length === 1) {
-        finishMatch(io, buildMatchResult(remainingPlayers[0].id, 'forfeit'));
-      } else if (remainingPlayers.length === 0) {
+      if (remainingPlayers.length === 0) {
+        if (!matchResult) {
+          await abandonMatchRecord(activeMatchId);
+        }
         resetArena(io);
       } else {
         emitPlayers(io);

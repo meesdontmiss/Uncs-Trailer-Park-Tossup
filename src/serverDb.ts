@@ -3,6 +3,7 @@ import path from 'path';
 import dotenv from 'dotenv';
 import pg from 'pg';
 import type { MatchResult, PlayerSnapshot, ProjectileSnapshot, Vec3 } from './gameTypes';
+import type { EntryPaymentReceipt } from './paymentTypes';
 
 const { Pool } = pg;
 
@@ -26,6 +27,12 @@ interface FinishMatchInput {
   result: MatchResult;
   players: PlayerSnapshot[];
   getProfile: (socketId: string) => PersistedProfile | undefined;
+}
+
+interface PayoutSettlementInput {
+  ok: boolean;
+  message: string;
+  signatures: string[];
 }
 
 const databaseUrl = process.env.DATABASE_URL;
@@ -132,6 +139,32 @@ export async function createMatch(wager: string, buyInUnc: number) {
   });
 }
 
+export async function abandonMatchRecord(matchId: string | null, reason = 'abandoned') {
+  if (!matchId) {
+    return;
+  }
+
+  await withDb('abandonMatchRecord', async () => {
+    await pool!.query(
+      `update matches
+       set status = $2,
+           end_reason = $2,
+           ended_at = coalesce(ended_at, now()),
+           updated_at = now()
+       where id = $1 and status = 'active'`,
+      [matchId, reason],
+    );
+
+    await pool!.query(
+      `update match_players
+       set left_at = coalesce(left_at, now()),
+           result = coalesce(result, $2)
+       where match_id = $1 and left_at is null`,
+      [matchId, reason],
+    );
+  });
+}
+
 export async function upsertMatchPlayer(matchId: string | null, input: MatchPlayerInput) {
   if (!matchId) {
     return;
@@ -180,6 +213,50 @@ export async function markPlayerLeft(matchId: string | null, socketId: string) {
        where match_id = $1 and socket_id = $2 and left_at is null`,
       [matchId, socketId],
     );
+  });
+}
+
+export async function recordEntryPayment(
+  matchId: string | null,
+  socketId: string,
+  profile: PersistedProfile,
+  receipt: EntryPaymentReceipt,
+) {
+  await withDb('recordEntryPayment', async () => {
+    await pool!.query(
+      `insert into entry_payments (
+         match_id, socket_id, profile_id, wallet_address, wager, amount_unc, signature, status, verified_at
+       )
+       values ($1, $2, $3, $4, $5, $6, $7, 'verified', $8)
+       on conflict (signature) do update
+       set match_id = coalesce(entry_payments.match_id, excluded.match_id),
+           socket_id = excluded.socket_id,
+           profile_id = excluded.profile_id,
+           wallet_address = excluded.wallet_address,
+           wager = excluded.wager,
+           amount_unc = excluded.amount_unc,
+           status = 'verified',
+           verified_at = excluded.verified_at`,
+      [
+        matchId,
+        socketId,
+        profile.id,
+        receipt.walletAddress,
+        receipt.wager,
+        receipt.amountUnc,
+        receipt.signature,
+        toDate(receipt.verifiedAt),
+      ],
+    );
+
+    if (matchId) {
+      await pool!.query(
+        `update match_players
+         set unc_paid = greatest(unc_paid, $3)
+         where match_id = $1 and socket_id = $2`,
+        [matchId, socketId, receipt.amountUnc],
+      );
+    }
   });
 }
 
@@ -301,6 +378,9 @@ export async function finishMatchRecord(matchId: string | null, input: FinishMat
   await withDb('finishMatchRecord', async () => {
     const winnerProfile = input.result.winnerId ? input.getProfile(input.result.winnerId) : undefined;
     const secondProfile = input.result.secondPlaceBonusId ? input.getProfile(input.result.secondPlaceBonusId) : undefined;
+    const profileBySocket = new Map<string, PersistedProfile | undefined>(
+      input.players.map((player) => [player.id, input.getProfile(player.id)]),
+    );
     const sortedPlayers = [...input.players].sort((left, right) => {
       if (left.id === input.result.winnerId) return -1;
       if (right.id === input.result.winnerId) return 1;
@@ -321,7 +401,7 @@ export async function finishMatchRecord(matchId: string | null, input: FinishMat
            end_reason = $10,
            ended_at = $11,
            updated_at = now()
-       where id = $1`,
+      where id = $1`,
       [
         matchId,
         input.result.playerCount,
@@ -339,16 +419,49 @@ export async function finishMatchRecord(matchId: string | null, input: FinishMat
 
     for (let index = 0; index < sortedPlayers.length; index += 1) {
       const player = sortedPlayers[index];
-      const profile = input.getProfile(player.id);
+      const profile = profileBySocket.get(player.id);
+      const result = player.id === input.result.winnerId ? 'win' : 'loss';
+      const uncWon = player.id === input.result.winnerId ? input.result.payoutPoolUnc : 0;
+      const houseFeeShare = input.result.playerCount > 0
+        ? Number((input.result.houseFeeUnc / input.result.playerCount).toFixed(2))
+        : 0;
       await pool!.query(
-        `update match_players
-         set kills = $3,
-             deaths = $4,
-             health = $5,
-             alive = $6,
-             final_rank = $7
-         where match_id = $1 and socket_id = $2`,
-        [matchId, player.id, player.kills, player.deaths, player.health, player.alive, index + 1],
+        `insert into match_players (
+           match_id, socket_id, profile_id, wallet_address, username, pfp,
+           kills, deaths, health, alive, final_rank, result, unc_paid, unc_won, house_fee_unc
+         )
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+         on conflict (match_id, socket_id) do update
+         set profile_id = excluded.profile_id,
+             wallet_address = excluded.wallet_address,
+             username = excluded.username,
+             pfp = excluded.pfp,
+             kills = excluded.kills,
+             deaths = excluded.deaths,
+             health = excluded.health,
+             alive = excluded.alive,
+             final_rank = excluded.final_rank,
+             result = excluded.result,
+             unc_paid = greatest(match_players.unc_paid, excluded.unc_paid),
+             unc_won = excluded.unc_won,
+             house_fee_unc = excluded.house_fee_unc`,
+        [
+          matchId,
+          player.id,
+          profile?.id ?? null,
+          profile?.walletAddress ?? null,
+          profile?.username ?? `Player_${player.id.slice(0, 4)}`,
+          profile?.pfp ?? '🥫',
+          player.kills,
+          player.deaths,
+          player.health,
+          player.alive,
+          index + 1,
+          result,
+          input.result.buyInUnc,
+          uncWon,
+          houseFeeShare,
+        ],
       );
 
       if (profile?.id) {
@@ -356,13 +469,184 @@ export async function finishMatchRecord(matchId: string | null, input: FinishMat
           `update player_profiles
            set matches_played = matches_played + 1,
                wins = wins + $2,
-               kills = kills + $3,
-               deaths = deaths + $4,
+               losses = losses + $3,
+               kills = kills + $4,
+               deaths = deaths + $5,
+               unc_won = unc_won + $6,
+               unc_spent = unc_spent + $7,
+               unc_house_fees_paid = unc_house_fees_paid + $8,
                updated_at = now()
            where id = $1`,
-          [profile.id, player.id === input.result.winnerId ? 1 : 0, player.kills, player.deaths],
+          [
+            profile.id,
+            player.id === input.result.winnerId ? 1 : 0,
+            player.id === input.result.winnerId ? 0 : 1,
+            player.kills,
+            player.deaths,
+            uncWon,
+            input.result.buyInUnc,
+            houseFeeShare,
+          ],
         );
       }
     }
+
+    await pool!.query(
+      `update match_players
+       set left_at = coalesce(left_at, now()),
+           final_rank = coalesce(final_rank, ranked.rank),
+           result = coalesce(result, 'loss'),
+           unc_paid = greatest(unc_paid, $2)
+       from (
+         select id, row_number() over (order by joined_at) + $3 as rank
+         from match_players
+         where match_id = $1 and final_rank is null
+       ) ranked
+       where match_players.id = ranked.id`,
+      [matchId, input.result.buyInUnc, sortedPlayers.length],
+    );
+
+    await pool!.query(
+      `with affected_profiles as (
+         select distinct profile_id
+         from match_players
+         where match_id = $1 and profile_id is not null
+       ),
+       rollup as (
+         select
+           mp.profile_id,
+           count(*) filter (where mp.result in ('win', 'loss'))::int as matches_played,
+           count(*) filter (where mp.result = 'win')::int as wins,
+           count(*) filter (where mp.result = 'loss')::int as losses,
+           coalesce(sum(mp.kills), 0)::int as kills,
+           coalesce(sum(mp.deaths), 0)::int as deaths,
+           coalesce(sum(mp.unc_won), 0)::numeric(18, 2) as unc_won,
+           coalesce(sum(mp.unc_paid), 0)::numeric(18, 2) as unc_spent,
+           coalesce(sum(mp.house_fee_unc), 0)::numeric(18, 2) as unc_house_fees_paid
+         from match_players mp
+         join affected_profiles ap on ap.profile_id = mp.profile_id
+         group by mp.profile_id
+       )
+       update player_profiles
+       set matches_played = rollup.matches_played,
+           wins = rollup.wins,
+           losses = rollup.losses,
+           kills = rollup.kills,
+           deaths = rollup.deaths,
+           unc_won = rollup.unc_won,
+           unc_spent = rollup.unc_spent,
+           unc_house_fees_paid = rollup.unc_house_fees_paid,
+           updated_at = now()
+       from rollup
+       where player_profiles.id = rollup.profile_id`,
+      [matchId],
+    );
+  });
+}
+
+export async function recordPayoutSettlement(
+  matchId: string | null,
+  result: MatchResult,
+  winnerProfile: PersistedProfile | undefined,
+  settlement: PayoutSettlementInput,
+) {
+  if (!matchId) {
+    return settlement;
+  }
+
+  await withDb('recordPayoutSettlement', async () => {
+    const signature = settlement.signatures[0] ?? null;
+    const status = settlement.ok
+      ? (settlement.signatures.length > 0 ? 'settled' : 'not_required')
+      : 'skipped';
+
+    await pool!.query(
+      `insert into payouts (
+         match_id, winner_profile_id, winner_wallet_address, gross_pot_unc,
+         house_fee_unc, payout_pool_unc, status, message, signatures
+       )
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)`,
+      [
+        matchId,
+        winnerProfile?.id ?? null,
+        winnerProfile?.walletAddress ?? null,
+        result.grossPotUnc,
+        result.houseFeeUnc,
+        result.payoutPoolUnc,
+        status,
+        settlement.message,
+        JSON.stringify(settlement.signatures),
+      ],
+    );
+
+    await pool!.query(
+      `update matches
+       set payout_status = $2,
+           payout_signature = $3,
+           payout_error = $4,
+           updated_at = now()
+       where id = $1`,
+      [matchId, status, signature, settlement.ok ? null : settlement.message],
+    );
+  });
+
+  return settlement;
+}
+
+export async function repairHistoricalRollups() {
+  await withDb('repairHistoricalRollups', async () => {
+    await pool!.query(
+      `update matches
+       set status = 'abandoned',
+           end_reason = coalesce(end_reason, 'abandoned'),
+           ended_at = coalesce(ended_at, updated_at, created_at),
+           updated_at = now()
+       where status = 'active'
+         and not exists (
+           select 1 from match_players
+           where match_players.match_id = matches.id
+             and match_players.left_at is null
+         )`,
+    );
+
+    await pool!.query(
+      `update match_players
+       set result = case
+           when final_rank = 1 then 'win'
+           when final_rank is not null then 'loss'
+           when left_at is not null then 'abandoned'
+           else result
+         end`,
+    );
+
+    await pool!.query(
+      `with rollup as (
+         select
+           profile_id,
+           count(*) filter (where result in ('win', 'loss'))::int as matches_played,
+           count(*) filter (where result = 'win')::int as wins,
+           count(*) filter (where result = 'loss')::int as losses,
+           coalesce(sum(kills), 0)::int as kills,
+           coalesce(sum(deaths), 0)::int as deaths,
+           coalesce(sum(unc_won), 0)::numeric(18, 2) as unc_won,
+           coalesce(sum(unc_paid), 0)::numeric(18, 2) as unc_spent,
+           coalesce(sum(house_fee_unc), 0)::numeric(18, 2) as unc_house_fees_paid
+         from match_players
+         where profile_id is not null
+         group by profile_id
+       )
+       update player_profiles
+       set matches_played = coalesce(rollup.matches_played, 0),
+           wins = coalesce(rollup.wins, 0),
+           losses = coalesce(rollup.losses, 0),
+           kills = coalesce(rollup.kills, 0),
+           deaths = coalesce(rollup.deaths, 0),
+           unc_won = coalesce(rollup.unc_won, 0),
+           unc_spent = coalesce(rollup.unc_spent, 0),
+           unc_house_fees_paid = coalesce(rollup.unc_house_fees_paid, 0),
+           updated_at = now()
+       from rollup
+       where player_profiles.id = rollup.profile_id`,
+    );
   });
 }
