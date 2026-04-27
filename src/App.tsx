@@ -1,4 +1,10 @@
 import { lazy, Suspense, startTransition, useEffect, useMemo, useRef, useState } from 'react';
+import { Connection, PublicKey, Transaction } from '@solana/web3.js';
+import {
+  createAssociatedTokenAccountIdempotentInstruction,
+  createTransferCheckedInstruction,
+  getAssociatedTokenAddress,
+} from '@solana/spl-token';
 import {
   BadgeDollarSign,
   Check,
@@ -17,6 +23,7 @@ import {
 import { HOUSE_FEE_RATE } from './gameTypes';
 import { playLobbyJoinPing, playMatchStartAlert, startLobbyMusic, stopGameAmbience } from './lib/audio';
 import { disconnectSocket, ensureSocketConnected, socket } from './lib/socket';
+import type { EntryPaymentResult, PaymentConfig } from './paymentTypes';
 import { useGameStore } from './store';
 
 const GameExperience = lazy(() => import('./components/game/GameExperience'));
@@ -42,6 +49,8 @@ type SolanaProvider = {
   isPhantom?: boolean;
   publicKey?: { toString: () => string };
   connect: () => Promise<{ publicKey: { toString: () => string } }>;
+  signAndSendTransaction?: (transaction: Transaction) => Promise<{ signature: string }>;
+  signTransaction?: (transaction: Transaction) => Promise<Transaction>;
   disconnect?: () => Promise<void>;
 };
 
@@ -78,6 +87,18 @@ function parseBuyInUnc(value: string) {
 
 function formatUnc(value: number) {
   return value === 0 ? '0 $UNC' : `${value.toLocaleString(undefined, { maximumFractionDigits: 2 })} $UNC`;
+}
+
+function uncToBaseUnits(value: number, decimals: number) {
+  const fixed = value.toFixed(decimals);
+  const [whole, fraction = ''] = fixed.split('.');
+  return BigInt(`${whole}${fraction.padEnd(decimals, '0')}`);
+}
+
+function socketEmitWithAck<T>(event: string, payload?: unknown) {
+  return new Promise<T>((resolve) => {
+    socket.emit(event, payload, resolve);
+  });
 }
 
 function profileStorageKey(walletAddress: string | null) {
@@ -415,6 +436,8 @@ function LobbyScreen({
   const [profileDraft, setProfileDraft] = useState(defaultProfile);
   const [paidWagers, setPaidWagers] = useState<Record<string, boolean>>({});
   const [notice, setNotice] = useState<LobbyNotice>(null);
+  const [paymentConfig, setPaymentConfig] = useState<PaymentConfig | null>(null);
+  const [paymentPending, setPaymentPending] = useState(false);
   const selectedPlayerCountRef = useRef(0);
   const selectedRoom = lobbyRooms.find((room) => room.wager === wager);
   const selectedPlayers = selectedRoom?.players ?? [];
@@ -436,11 +459,14 @@ function LobbyScreen({
     ensureSocketConnected();
 
     socket.on('lobbyRooms', setLobbyRooms);
+    socket.on('paymentConfig', setPaymentConfig);
     socket.emit('selectLobby', wager);
     socket.emit('saveProfile', profile);
+    socket.emit('getPaymentConfig', setPaymentConfig);
 
     return () => {
       socket.off('lobbyRooms', setLobbyRooms);
+      socket.off('paymentConfig', setPaymentConfig);
     };
   }, [profile, setLobbyRooms, wager]);
 
@@ -451,6 +477,13 @@ function LobbyScreen({
 
     selectedPlayerCountRef.current = selectedPlayers.length;
   }, [selectedPlayers.length, wager]);
+
+  useEffect(() => {
+    const myLobbyEntry = selectedPlayers.find((player) => player.id === socket.id);
+    if (myLobbyEntry?.entryPaid) {
+      setPaidWagers((current) => ({ ...current, [wager]: true }));
+    }
+  }, [selectedPlayers, wager]);
 
   const handleSaveProfile = () => {
     const nextProfile = {
@@ -479,16 +512,71 @@ function LobbyScreen({
     handleSelectWager('FREE');
   };
 
-  const handleConfirmEntry = () => {
+  const handleConfirmEntry = async () => {
     if (!hasWallet) {
       setNotice({ tone: 'warning', message: 'Connect your wallet before paying an entry fee.' });
       void onConnectWallet();
       return;
     }
 
-    setPaidWagers((current) => ({ ...current, [wager]: true }));
-    setNotice({ tone: 'success', message: `${selectedTier.buyIn} entry confirmed. You can ready up now.` });
-    playLobbyJoinPing();
+    if (!paymentConfig?.enabled || !paymentConfig.tokenMint || !paymentConfig.hotWalletAddress || !paymentConfig.rpcUrl) {
+      setNotice({ tone: 'warning', message: 'Wager payments are not configured yet. Use the free room for now.' });
+      return;
+    }
+
+    const provider = getSolanaProvider();
+    if (!provider?.publicKey || (!provider.signAndSendTransaction && !provider.signTransaction)) {
+      setNotice({ tone: 'warning', message: 'Your wallet does not support signing the entry transaction.' });
+      return;
+    }
+
+    setPaymentPending(true);
+    setNotice({ tone: 'info', message: `Approve the ${selectedTier.buyIn} entry transfer in your wallet.` });
+
+    try {
+      const connection = new Connection(paymentConfig.rpcUrl, 'confirmed');
+      const payer = new PublicKey(provider.publicKey.toString());
+      const mint = new PublicKey(paymentConfig.tokenMint);
+      const hotWallet = new PublicKey(paymentConfig.hotWalletAddress);
+      const sourceAta = await getAssociatedTokenAddress(mint, payer);
+      const destinationAta = await getAssociatedTokenAddress(mint, hotWallet, true);
+      const amount = uncToBaseUnits(selectedBuyInUnc, paymentConfig.tokenDecimals);
+      const transaction = new Transaction().add(
+        createAssociatedTokenAccountIdempotentInstruction(payer, destinationAta, hotWallet, mint),
+        createTransferCheckedInstruction(sourceAta, mint, destinationAta, payer, amount, paymentConfig.tokenDecimals),
+      );
+      const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
+      transaction.feePayer = payer;
+      transaction.recentBlockhash = blockhash;
+
+      const signature = provider.signAndSendTransaction
+        ? (await provider.signAndSendTransaction(transaction)).signature
+        : await connection.sendRawTransaction((await provider.signTransaction!(transaction)).serialize());
+
+      await connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, 'confirmed');
+      const result = await socketEmitWithAck<EntryPaymentResult>('verifyEntryPayment', {
+        signature,
+        wager,
+        walletAddress: payer.toBase58(),
+        amountUnc: selectedBuyInUnc,
+      });
+
+      if (!result.ok) {
+        setNotice({ tone: 'warning', message: result.message });
+        return;
+      }
+
+      setPaidWagers((current) => ({ ...current, [wager]: true }));
+      setNotice({ tone: 'success', message: `${selectedTier.buyIn} entry verified on-chain. You can ready up now.` });
+      playLobbyJoinPing();
+    } catch (error) {
+      setNotice({
+        tone: 'warning',
+        message: error instanceof Error ? error.message : 'Entry payment failed. Try again or use the free room.',
+      });
+    } finally {
+      setPaymentPending(false);
+    }
   };
 
   const handleReadyUp = () => {
@@ -653,10 +741,13 @@ function LobbyScreen({
                       <button
                         type="button"
                         onClick={hasWallet ? handleConfirmEntry : onConnectWallet}
-                        className="inline-flex items-center justify-center gap-2 rounded border border-yellow-300/35 bg-yellow-300/15 px-3 py-2 font-mono text-xs uppercase tracking-[0.12em] text-yellow-100 transition hover:bg-yellow-300/25"
+                        disabled={paymentPending || (hasWallet && !paymentConfig?.enabled)}
+                        className="inline-flex items-center justify-center gap-2 rounded border border-yellow-300/35 bg-yellow-300/15 px-3 py-2 font-mono text-xs uppercase tracking-[0.12em] text-yellow-100 transition hover:bg-yellow-300/25 disabled:cursor-not-allowed disabled:opacity-45"
                       >
                         <Wallet size={14} />
-                        {hasWallet ? (hasPaidSelectedEntry ? 'Paid' : `Pay ${selectedTier.buyIn}`) : 'Connect'}
+                        {hasWallet
+                          ? (hasPaidSelectedEntry ? 'Paid' : paymentPending ? 'Paying' : paymentConfig?.enabled ? `Pay ${selectedTier.buyIn}` : 'Not Live')
+                          : 'Connect'}
                       </button>
                       <button
                         type="button"

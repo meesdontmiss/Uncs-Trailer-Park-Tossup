@@ -30,6 +30,7 @@ export interface LobbyPlayerSnapshot {
   walletAddress: string | null;
   username: string;
   pfp: string;
+  entryPaid: boolean;
 }
 
 export interface LobbyRoomSnapshot {

@@ -33,6 +33,13 @@ import {
   upsertMatchPlayer,
   type PersistedProfile,
 } from './src/serverDb';
+import {
+  getHotWalletTokenAccount,
+  getPaymentConfig,
+  settleMatchPayout,
+  verifyEntryPayment,
+} from './src/serverPayments';
+import type { EntryPaymentReceipt } from './src/paymentTypes';
 
 interface LobbyProfile extends PersistedProfile {}
 
@@ -52,6 +59,7 @@ const players: Record<string, ServerPlayer> = {};
 const projectiles = new Map<string, ServerProjectile>();
 const lobbySelections = new Map<string, { wager: string; joinedAt: number }>();
 const lobbyProfiles = new Map<string, LobbyProfile>();
+const entryPayments = new Map<string, EntryPaymentReceipt>();
 let matchResult: MatchResult | null = null;
 let activeMatchId: string | null = null;
 
@@ -169,6 +177,7 @@ function snapshotLobbyRooms(): LobbyRoomSnapshot[] {
       walletAddress: profile?.walletAddress ?? null,
       username: profile?.username ?? `Player_${id.slice(0, 4)}`,
       pfp: profile?.pfp ?? '🥫',
+      entryPaid: selection.wager === 'FREE' || entryPayments.get(id)?.wager === selection.wager,
     });
     rooms.set(selection.wager, room);
   }
@@ -372,12 +381,20 @@ function resetArena(io: Server) {
 
 function finishMatch(io: Server, result: MatchResult) {
   matchResult = result;
-  persist(recordEvent(activeMatchId, 'matchEnded', result));
-  persist(finishMatchRecord(activeMatchId, {
+  const matchId = activeMatchId;
+  const winnerWalletAddress = result.winnerId ? getProfile(result.winnerId).walletAddress : null;
+  persist(recordEvent(matchId, 'matchEnded', result));
+  persist(finishMatchRecord(matchId, {
     result,
     players: Object.values(players),
     getProfile,
   }));
+  persist(settleMatchPayout({
+    winnerWalletAddress,
+    grossPotUnc: result.grossPotUnc,
+    houseFeeUnc: result.houseFeeUnc,
+    payoutPoolUnc: result.payoutPoolUnc,
+  }).then((settlement) => recordEvent(matchId, 'payoutSettlement', settlement)));
   clearProjectiles(io);
   io.emit('matchEnded', result);
   emitPlayers(io);
@@ -569,6 +586,13 @@ async function startServer() {
     });
   });
 
+  app.get('/api/payment-config', (_req, res) => {
+    res.json({
+      ...getPaymentConfig(),
+      hotWalletTokenAccount: getHotWalletTokenAccount(),
+    });
+  });
+
   const cleanupInterval = setInterval(() => {
     const now = Date.now();
 
@@ -610,7 +634,18 @@ async function startServer() {
   io.on('connection', (socket) => {
     console.log('Socket connected:', socket.id);
     socket.emit('lobbyRooms', snapshotLobbyRooms());
+    socket.emit('paymentConfig', {
+      ...getPaymentConfig(),
+      hotWalletTokenAccount: getHotWalletTokenAccount(),
+    });
     persist(recordEvent(activeMatchId, 'socketConnected', { socketId: socket.id }, eventActor(socket.id)));
+
+    socket.on('getPaymentConfig', (callback?: (config: ReturnType<typeof getPaymentConfig> & { hotWalletTokenAccount: string | null }) => void) => {
+      callback?.({
+        ...getPaymentConfig(),
+        hotWalletTokenAccount: getHotWalletTokenAccount(),
+      });
+    });
 
     socket.on('selectLobby', (wager: string) => {
       lobbySelections.set(socket.id, {
@@ -619,6 +654,47 @@ async function startServer() {
       });
       persist(recordEvent(activeMatchId, 'lobbySelected', { wager }, eventActor(socket.id)));
       emitLobbyRooms(io);
+    });
+
+    socket.on('verifyEntryPayment', async (
+      payload: { signature: string; wager: string; walletAddress: string; amountUnc: number },
+      callback?: (result: Awaited<ReturnType<typeof verifyEntryPayment>>) => void,
+    ) => {
+      const profile = getProfile(socket.id);
+      if (!profile.walletAddress || profile.walletAddress !== payload.walletAddress) {
+        const result = { ok: false, message: 'Connected wallet does not match this payment.' };
+        callback?.(result);
+        return;
+      }
+
+      const selection = lobbySelections.get(socket.id);
+      if (!selection || selection.wager !== payload.wager) {
+        const result = { ok: false, message: 'Select the wager room before paying its entry fee.' };
+        callback?.(result);
+        return;
+      }
+
+      const expectedAmount = parseBuyInUnc(payload.wager);
+      if (expectedAmount <= 0 || payload.amountUnc < expectedAmount) {
+        const result = { ok: false, message: 'Payment amount does not match this wager room.' };
+        callback?.(result);
+        return;
+      }
+
+      const result = await verifyEntryPayment({
+        signature: payload.signature,
+        wager: payload.wager,
+        walletAddress: payload.walletAddress,
+        amountUnc: expectedAmount,
+      });
+
+      if (result.ok && result.receipt) {
+        entryPayments.set(socket.id, result.receipt);
+        persist(recordEvent(activeMatchId, 'entryPaymentVerified', result.receipt, eventActor(socket.id)));
+        emitLobbyRooms(io);
+      }
+
+      callback?.(result);
     });
 
     socket.on('saveProfile', async (profile: Partial<LobbyProfile>) => {
@@ -665,6 +741,14 @@ async function startServer() {
         socket.emit('joinMatchRejected', {
           reason: 'walletRequired',
           message: 'Connect a wallet and confirm the entry fee before joining this wager room.',
+          wager,
+        });
+        return;
+      }
+      if (buyInUnc > 0 && entryPayments.get(socket.id)?.wager !== wager) {
+        socket.emit('joinMatchRejected', {
+          reason: 'paymentRequired',
+          message: 'Pay and verify the entry fee before joining this wager room.',
           wager,
         });
         return;
@@ -772,6 +856,7 @@ async function startServer() {
       delete players[socket.id];
       lobbySelections.delete(socket.id);
       lobbyProfiles.delete(socket.id);
+      entryPayments.delete(socket.id);
       persist(markPlayerLeft(activeMatchId, socket.id));
       persist(recordEvent(activeMatchId, 'playerDisconnected', { socketId: socket.id }, leavingActor));
 
