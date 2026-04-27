@@ -1,11 +1,18 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
 import { RigidBody, RapierRigidBody, CapsuleCollider } from '@react-three/rapier';
 import { useKeyboardControls, Billboard } from '@react-three/drei';
 import * as THREE from 'three';
 import { useGameStore } from '../../store';
-import { assets } from './assets';
 import { socket } from '../../lib/socket';
+import {
+  FULL_CHARGE_MS,
+  MAX_THROW_POWER,
+  MIN_THROW_POWER,
+  PLAYER_JUMP_FORCE,
+  PLAYER_MOVE_SPEED,
+} from '../../gameTypes';
+import { useShootTexture, useUncSpriteTextures } from './useGameTextures';
 import {
   playJumpSound,
   playThrowChargeStartSound,
@@ -15,11 +22,8 @@ import {
 } from '../../lib/audio';
 import { readMobileControls } from '../../lib/mobileControls';
 
-const SPEED = 15;
-const JUMP_FORCE = 8;
-const MIN_THROW_POWER = 26;
-const MAX_THROW_POWER = 58;
-const FULL_CHARGE_MS = 1100;
+const MOVE_ACCELERATION = 18;
+const COYOTE_TIME_MS = 120;
 
 export function Player() {
   const body = useRef<RapierRigidBody>(null);
@@ -28,15 +32,15 @@ export function Player() {
   const { camera } = useThree();
   const spriteMeshRef = useRef<THREE.Mesh>(null);
   const walkTime = useRef(0);
-  const [yaw, setYaw] = useState(0);
-  const [pitch, setPitch] = useState(0);
   const [isDead, setIsDead] = useState(false);
-  const yawRef = useRef(yaw);
-  const pitchRef = useRef(pitch);
+  const yawRef = useRef(0);
+  const pitchRef = useRef(0);
   const chargeStartedAt = useRef<number | null>(null);
+  const lastChargeUiUpdate = useRef(0);
   const wasMobileThrowHeld = useRef(false);
   const lastShootTime = useRef(0);
   const lastSync = useRef(0);
+  const lastGroundedAt = useRef(Date.now());
   const hasSpawned = useRef(false);
   const previousAlive = useRef<boolean | null>(null);
   const baseSpriteYOffset = 0;
@@ -44,25 +48,8 @@ export function Player() {
   const myInfo = useGameStore((state) => (socket.id ? state.playersInfo[socket.id] : undefined));
   const setThrowCharge = useGameStore((state) => state.setThrowCharge);
 
-  const textures = useMemo(() => {
-    const loader = new THREE.TextureLoader();
-    return assets.sprites.unc.map((path) => {
-      const texture = loader.load(path);
-      texture.magFilter = THREE.NearestFilter;
-      return texture;
-    });
-  }, []);
-
-  const shootTexture = useMemo(() => {
-    const texture = new THREE.TextureLoader().load(assets.sprites.UNC_SHOOT_BACK);
-    texture.magFilter = THREE.NearestFilter;
-    return texture;
-  }, []);
-
-  useEffect(() => {
-    yawRef.current = yaw;
-    pitchRef.current = pitch;
-  }, [yaw, pitch]);
+  const textures = useUncSpriteTextures();
+  const shootTexture = useShootTexture();
 
   useEffect(() => () => {
     chargeStartedAt.current = null;
@@ -137,8 +124,8 @@ export function Player() {
         return;
       }
 
-      setYaw((value) => value - (event.movementX * 0.002));
-      setPitch((value) => Math.max(-Math.PI / 2.5, Math.min(Math.PI / 2.5, value - (event.movementY * 0.002))));
+      yawRef.current -= event.movementX * 0.002;
+      pitchRef.current = Math.max(-Math.PI / 2.5, Math.min(Math.PI / 2.5, pitchRef.current - (event.movementY * 0.002)));
     };
 
     const handleMouseDown = (event: MouseEvent) => {
@@ -178,9 +165,22 @@ export function Player() {
       hasSpawned.current = true;
     };
 
+    const handleServerCorrection = ({ position }: { position: [number, number, number] }) => {
+      if (!body.current) {
+        return;
+      }
+
+      body.current.setTranslation({ x: position[0], y: position[1], z: position[2] }, true);
+      body.current.setLinvel({ x: 0, y: 0, z: 0 }, true);
+    };
+
     socket.on('spawnAssigned', handleSpawnAssigned);
+    socket.on('playerRespawned', handleSpawnAssigned);
+    socket.on('serverCorrection', handleServerCorrection);
     return () => {
       socket.off('spawnAssigned', handleSpawnAssigned);
+      socket.off('playerRespawned', handleSpawnAssigned);
+      socket.off('serverCorrection', handleServerCorrection);
     };
   }, []);
 
@@ -214,7 +214,7 @@ export function Player() {
     previousAlive.current = myInfo.alive;
   }, [myInfo]);
 
-  const lastYaw = useRef(yaw);
+  const lastYaw = useRef(0);
 
   useFrame((_, delta) => {
     if (!body.current) {
@@ -227,8 +227,6 @@ export function Player() {
       const nextPitch = Math.max(-Math.PI / 2.5, Math.min(Math.PI / 2.5, pitchRef.current - (mobile.lookY * 0.003)));
       yawRef.current = nextYaw;
       pitchRef.current = nextPitch;
-      setYaw(nextYaw);
-      setPitch(nextPitch);
     }
 
     if (mobile.throwHeld && !wasMobileThrowHeld.current) {
@@ -243,7 +241,11 @@ export function Player() {
 
     if (chargeStartedAt.current !== null) {
       const charge = Math.max(0, Math.min(1, (Date.now() - chargeStartedAt.current) / FULL_CHARGE_MS));
-      setThrowCharge(charge);
+      const now = Date.now();
+      if (now - lastChargeUiUpdate.current > 33 || charge >= 1) {
+        setThrowCharge(charge);
+        lastChargeUiUpdate.current = now;
+      }
       updateThrowChargeSound(charge);
     }
 
@@ -268,12 +270,22 @@ export function Player() {
     velocity.x += mobile.moveX;
     velocity.z -= mobile.moveY;
 
-    velocity.normalize().multiplyScalar(SPEED);
+    velocity.normalize().multiplyScalar(PLAYER_MOVE_SPEED);
+    const yaw = yawRef.current;
+    const pitch = pitchRef.current;
     velocity.applyAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
-    body.current.setLinvel({ x: velocity.x, y: currentVelocity.y, z: velocity.z }, true);
+    const acceleration = Math.min(1, delta * MOVE_ACCELERATION);
+    const nextVelocityX = THREE.MathUtils.lerp(currentVelocity.x, velocity.x, acceleration);
+    const nextVelocityZ = THREE.MathUtils.lerp(currentVelocity.z, velocity.z, acceleration);
+    body.current.setLinvel({ x: nextVelocityX, y: currentVelocity.y, z: nextVelocityZ }, true);
 
-    if ((jump || mobile.jump) && Math.abs(currentVelocity.y) < 0.1) {
-      body.current.setLinvel({ x: currentVelocity.x, y: JUMP_FORCE, z: currentVelocity.z }, true);
+    if (Math.abs(currentVelocity.y) < 0.1) {
+      lastGroundedAt.current = Date.now();
+    }
+
+    if ((jump || mobile.jump) && Date.now() - lastGroundedAt.current < COYOTE_TIME_MS) {
+      body.current.setLinvel({ x: nextVelocityX, y: PLAYER_JUMP_FORCE, z: nextVelocityZ }, true);
+      lastGroundedAt.current = 0;
       playJumpSound();
     }
 
@@ -300,7 +312,7 @@ export function Player() {
       .add(camRight.clone().multiplyScalar(shoulderOffset))
       .add(camForward.clone().multiplyScalar(-cameraDistance));
 
-    camera.position.copy(camPos);
+    camera.position.lerp(camPos, Math.min(1, delta * 18));
     camera.lookAt(camPos.clone().add(camForward.clone().multiplyScalar(100)));
 
     const yawVelocity = (yaw - lastYaw.current) / (delta || 0.016);
@@ -323,6 +335,10 @@ export function Player() {
     if (materialRef.current && materialRef.current.map !== activeTexture) {
       materialRef.current.map = activeTexture;
       materialRef.current.needsUpdate = true;
+    }
+    if (materialRef.current) {
+      const invulnerable = (myInfo?.invulnerableUntil ?? 0) > Date.now();
+      materialRef.current.opacity = invulnerable ? 0.55 + (Math.sin(Date.now() * 0.02) * 0.25) : 1;
     }
 
     if (Date.now() - lastSync.current > 50) {

@@ -12,6 +12,96 @@ let chargeLoop: { gain: GainNode; osc: OscillatorNode; lfo: OscillatorNode; stop
 
 const lobbyMusicSrc = '/music/TRAILER PARK UNCS.mp3';
 const gameMusicSrc = '/music/THE UNCTION.mp3';
+const musicStorageKey = 'unc-tossup-music-settings';
+const lobbyMusicBaseVolume = 0.46;
+const gameMusicBaseVolume = 0.5;
+
+type MusicSettings = {
+  volume: number;
+  muted: boolean;
+};
+
+const musicSubscribers = new Set<() => void>();
+let musicSettings: MusicSettings = loadMusicSettings();
+
+function clampVolume(volume: number) {
+  return Math.max(0, Math.min(1, volume));
+}
+
+function loadMusicSettings(): MusicSettings {
+  try {
+    const stored = window.localStorage.getItem(musicStorageKey);
+    if (!stored) {
+      return { volume: 0.5, muted: false };
+    }
+
+    const parsed = JSON.parse(stored) as Partial<MusicSettings>;
+    return {
+      volume: clampVolume(typeof parsed.volume === 'number' ? parsed.volume : 0.5),
+      muted: Boolean(parsed.muted),
+    };
+  } catch {
+    return { volume: 0.5, muted: false };
+  }
+}
+
+function persistMusicSettings() {
+  try {
+    window.localStorage.setItem(musicStorageKey, JSON.stringify(musicSettings));
+  } catch {
+    // Local storage is optional; audio controls still work for this session.
+  }
+}
+
+function notifyMusicSubscribers() {
+  musicSubscribers.forEach((listener) => listener());
+}
+
+function applyMusicSettings() {
+  const effectiveVolume = musicSettings.muted ? 0 : musicSettings.volume;
+
+  if (lobbyMusic) {
+    lobbyMusic.volume = lobbyMusicBaseVolume * effectiveVolume;
+    lobbyMusic.muted = musicSettings.muted;
+  }
+
+  if (gameMusic) {
+    gameMusic.volume = gameMusicBaseVolume * effectiveVolume;
+    gameMusic.muted = musicSettings.muted;
+  }
+}
+
+function updateMusicSettings(nextSettings: MusicSettings) {
+  musicSettings = {
+    volume: clampVolume(nextSettings.volume),
+    muted: nextSettings.muted,
+  };
+  applyMusicSettings();
+  persistMusicSettings();
+  notifyMusicSubscribers();
+}
+
+export function getMusicSettings() {
+  return musicSettings;
+}
+
+export function subscribeMusicSettings(listener: () => void) {
+  musicSubscribers.add(listener);
+  return () => {
+    musicSubscribers.delete(listener);
+  };
+}
+
+export function setMusicVolume(volume: number) {
+  updateMusicSettings({
+    volume,
+    muted: volume <= 0,
+  });
+}
+
+export function setMusicMuted(muted: boolean) {
+  updateMusicSettings({ ...musicSettings, muted });
+}
 
 function removeUnlockHandler(handler: (() => void) | null) {
   if (!handler) {
@@ -80,8 +170,8 @@ export function startLobbyMusic() {
   if (!lobbyMusic) {
     lobbyMusic = new Audio(lobbyMusicSrc);
     lobbyMusic.loop = true;
-    lobbyMusic.volume = 0.46;
     lobbyMusic.preload = 'auto';
+    applyMusicSettings();
   }
 
   if (!lobbyMusic.paused || lobbyMusicPlayPending) {
@@ -142,8 +232,8 @@ export function startGameMusic() {
   if (!gameMusic) {
     gameMusic = new Audio(gameMusicSrc);
     gameMusic.loop = true;
-    gameMusic.volume = 0.5;
     gameMusic.preload = 'auto';
+    applyMusicSettings();
   }
 
   if (!gameMusic.paused || gameMusicPlayPending) {

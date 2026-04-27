@@ -1,10 +1,4 @@
 import { lazy, Suspense, startTransition, useEffect, useMemo, useRef, useState } from 'react';
-import { Connection, PublicKey, Transaction } from '@solana/web3.js';
-import {
-  createAssociatedTokenAccountIdempotentInstruction,
-  createTransferCheckedInstruction,
-  getAssociatedTokenAddress,
-} from '@solana/spl-token';
 import {
   BadgeDollarSign,
   Check,
@@ -18,10 +12,21 @@ import {
   RadioTower,
   Trophy,
   Users,
+  Volume2,
+  VolumeX,
   Wallet,
 } from 'lucide-react';
 import { HOUSE_FEE_RATE } from './gameTypes';
-import { playLobbyJoinPing, playMatchStartAlert, startLobbyMusic, stopGameAmbience } from './lib/audio';
+import {
+  getMusicSettings,
+  playLobbyJoinPing,
+  playMatchStartAlert,
+  setMusicMuted,
+  setMusicVolume,
+  startLobbyMusic,
+  stopGameAmbience,
+  subscribeMusicSettings,
+} from './lib/audio';
 import { disconnectSocket, ensureSocketConnected, socket } from './lib/socket';
 import type { EntryPaymentResult, PaymentConfig } from './paymentTypes';
 import { useGameStore } from './store';
@@ -49,8 +54,8 @@ type SolanaProvider = {
   isPhantom?: boolean;
   publicKey?: { toString: () => string };
   connect: () => Promise<{ publicKey: { toString: () => string } }>;
-  signAndSendTransaction?: (transaction: Transaction) => Promise<{ signature: string }>;
-  signTransaction?: (transaction: Transaction) => Promise<Transaction>;
+  signAndSendTransaction?: (transaction: unknown) => Promise<{ signature: string }>;
+  signTransaction?: (transaction: unknown) => Promise<{ serialize: () => Uint8Array }>;
   disconnect?: () => Promise<void>;
 };
 
@@ -392,6 +397,52 @@ function StartScreen({
   );
 }
 
+function MusicControl() {
+  const [settings, setSettings] = useState(getMusicSettings);
+  const volumePercent = Math.round(settings.volume * 100);
+  const isMuted = settings.muted || volumePercent === 0;
+
+  useEffect(() => {
+    return subscribeMusicSettings(() => setSettings({ ...getMusicSettings() }));
+  }, []);
+
+  return (
+    <div
+      className="fixed bottom-4 right-4 z-50 flex items-center gap-2 rounded border border-white/12 bg-black/65 px-1.5 py-1.5 shadow-2xl backdrop-blur-md sm:px-2.5 sm:py-2"
+      onPointerDown={(event) => event.stopPropagation()}
+      onClick={(event) => event.stopPropagation()}
+    >
+      <button
+        type="button"
+        onClick={() => setMusicMuted(!isMuted)}
+        className={`inline-flex h-9 w-9 items-center justify-center rounded border transition ${
+          isMuted
+            ? 'border-white/15 bg-white/[0.06] text-white/65 hover:bg-white/10 hover:text-white'
+            : 'border-monster/40 bg-monster/15 text-monster hover:bg-monster/25'
+        }`}
+        aria-label={isMuted ? 'Unmute music' : 'Mute music'}
+        title={isMuted ? 'Unmute music' : 'Mute music'}
+      >
+        {isMuted ? <VolumeX size={17} /> : <Volume2 size={17} />}
+      </button>
+      <label className="sr-only" htmlFor="music-volume">Music volume</label>
+      <input
+        id="music-volume"
+        type="range"
+        min="0"
+        max="100"
+        value={volumePercent}
+        onChange={(event) => setMusicVolume(Number(event.currentTarget.value) / 100)}
+        className="hidden h-2 w-24 accent-monster sm:block sm:w-28"
+        aria-label="Music volume"
+      />
+      <div className="hidden w-8 text-right font-mono text-[10px] uppercase text-white/45 sm:block">
+        {isMuted ? 'Off' : volumePercent}
+      </div>
+    </div>
+  );
+}
+
 function LobbyBillboard() {
   return (
     <div className="relative w-full max-w-[30rem] overflow-visible lg:ml-6">
@@ -438,9 +489,15 @@ function LobbyScreen({
   const [notice, setNotice] = useState<LobbyNotice>(null);
   const [paymentConfig, setPaymentConfig] = useState<PaymentConfig | null>(null);
   const [paymentPending, setPaymentPending] = useState(false);
+  const [clock, setClock] = useState(Date.now());
   const selectedPlayerCountRef = useRef(0);
   const selectedRoom = lobbyRooms.find((room) => room.wager === wager);
   const selectedPlayers = selectedRoom?.players ?? [];
+  const selectedReadyCount = selectedRoom?.readyCount ?? 0;
+  const selectedCountdownEndsAt = selectedRoom?.countdownEndsAt ?? null;
+  const countdownSeconds = selectedCountdownEndsAt ? Math.max(0, Math.ceil((selectedCountdownEndsAt - clock) / 1000)) : 0;
+  const myLobbyEntry = selectedPlayers.find((player) => player.id === socket.id);
+  const isReady = Boolean(myLobbyEntry?.ready);
   const selectedTier = wagerTiers.find((tier) => tier.value === wager) ?? wagerTiers[0];
   const selectedBuyInUnc = parseBuyInUnc(selectedTier.value);
   const selectedGrossPotUnc = selectedBuyInUnc * selectedPlayers.length;
@@ -458,8 +515,18 @@ function LobbyScreen({
   useEffect(() => {
     ensureSocketConnected();
 
+    const handleMatchStarting = ({ wager: startingWager }: { wager: string }) => {
+      if (startingWager !== wager) {
+        return;
+      }
+
+      setNotice({ tone: 'success', message: 'Match is starting. Loading into the park.' });
+      onStartGame();
+    };
+
     socket.on('lobbyRooms', setLobbyRooms);
     socket.on('paymentConfig', setPaymentConfig);
+    socket.on('matchStarting', handleMatchStarting);
     socket.emit('selectLobby', wager);
     socket.emit('saveProfile', profile);
     socket.emit('getPaymentConfig', setPaymentConfig);
@@ -467,8 +534,14 @@ function LobbyScreen({
     return () => {
       socket.off('lobbyRooms', setLobbyRooms);
       socket.off('paymentConfig', setPaymentConfig);
+      socket.off('matchStarting', handleMatchStarting);
     };
-  }, [profile, setLobbyRooms, wager]);
+  }, [onStartGame, profile, setLobbyRooms, wager]);
+
+  useEffect(() => {
+    const intervalId = window.setInterval(() => setClock(Date.now()), 250);
+    return () => window.clearInterval(intervalId);
+  }, []);
 
   useEffect(() => {
     if (selectedPlayers.length > selectedPlayerCountRef.current) {
@@ -479,11 +552,10 @@ function LobbyScreen({
   }, [selectedPlayers.length, wager]);
 
   useEffect(() => {
-    const myLobbyEntry = selectedPlayers.find((player) => player.id === socket.id);
     if (myLobbyEntry?.entryPaid) {
       setPaidWagers((current) => ({ ...current, [wager]: true }));
     }
-  }, [selectedPlayers, wager]);
+  }, [myLobbyEntry?.entryPaid, wager]);
 
   const handleSaveProfile = () => {
     const nextProfile = {
@@ -534,6 +606,17 @@ function LobbyScreen({
     setNotice({ tone: 'info', message: `Approve the ${selectedTier.buyIn} entry transfer in your wallet.` });
 
     try {
+      const [
+        { Connection, PublicKey, Transaction },
+        {
+          createAssociatedTokenAccountIdempotentInstruction,
+          createTransferCheckedInstruction,
+          getAssociatedTokenAddress,
+        },
+      ] = await Promise.all([
+        import('@solana/web3.js'),
+        import('@solana/spl-token'),
+      ]);
       const connection = new Connection(paymentConfig.rpcUrl, 'confirmed');
       const payer = new PublicKey(provider.publicKey.toString());
       const mint = new PublicKey(paymentConfig.tokenMint);
@@ -590,8 +673,11 @@ function LobbyScreen({
       return;
     }
 
-    setNotice(null);
-    onStartGame();
+    const nextReady = !isReady;
+    socket.emit('setReady', nextReady);
+    setNotice(nextReady
+      ? { tone: 'success', message: selectedPlayers.length >= 2 ? 'Ready locked. Match starts when everyone is ready.' : 'Ready locked. Waiting for another player.' }
+      : { tone: 'info', message: 'You are no longer ready.' });
   };
 
   return (
@@ -697,7 +783,11 @@ function LobbyScreen({
                 <div className="mb-3 flex items-center justify-between gap-3">
                   <div>
                     <div className="font-pixel text-3xl uppercase text-white">{wager === 'FREE' ? 'Free Room' : wager}</div>
-                    <div className="font-mono text-xs uppercase tracking-[0.18em] text-white/45">Players in selected lobby</div>
+                    <div className="font-mono text-xs uppercase tracking-[0.18em] text-white/45">
+                      {countdownSeconds > 0
+                        ? `Match starts in ${countdownSeconds}`
+                        : `${selectedReadyCount}/${Math.max(2, selectedPlayers.length)} ready`}
+                    </div>
                   </div>
                   <BadgeDollarSign className="text-yellow-300" size={26} />
                 </div>
@@ -719,6 +809,20 @@ function LobbyScreen({
                     <span className="block text-white/35">Payout</span>
                     <span className="text-monster">{formatUnc(selectedPayoutPoolUnc)}</span>
                   </div>
+                </div>
+
+                <div className={`mb-3 rounded border px-3 py-2 font-mono text-[10px] uppercase tracking-[0.14em] ${
+                  countdownSeconds > 0
+                    ? 'border-monster/45 bg-monster/15 text-monster'
+                    : selectedPlayers.length < 2
+                      ? 'border-yellow-300/30 bg-yellow-300/10 text-yellow-100'
+                      : 'border-white/12 bg-white/[0.05] text-white/60'
+                }`}>
+                  {countdownSeconds > 0
+                    ? `Everyone is ready. Drop-in starts in ${countdownSeconds}.`
+                    : selectedPlayers.length < 2
+                      ? 'Ready up now. A second player starts the countdown.'
+                      : 'Match starts automatically when every player in this room is ready.'}
                 </div>
 
                 <div className={`mb-3 rounded border p-3 ${isPaidRoom ? 'border-yellow-300/25 bg-yellow-300/10' : 'border-monster/25 bg-monster/10'}`}>
@@ -771,10 +875,21 @@ function LobbyScreen({
                     </div>
                   )}
                   {selectedPlayers.slice(0, 4).map((player, index) => (
-                    <div key={player.id} className="grid grid-cols-[auto_auto_1fr] items-center gap-2 rounded border border-white/10 bg-white/[0.06] px-3 py-2 font-mono text-xs">
+                    <div key={player.id} className={`grid grid-cols-[auto_auto_1fr_auto] items-center gap-2 rounded border px-3 py-2 font-mono text-xs ${
+                      player.ready
+                        ? 'border-monster/35 bg-monster/10'
+                        : 'border-white/10 bg-white/[0.06]'
+                    }`}>
                       <span className="text-white/35">{index + 1}.</span>
                       <span>{player.pfp}</span>
                       <span className="truncate">{player.id === socket.id ? `${player.username} (YOU)` : player.username}</span>
+                      <span className={`rounded border px-2 py-1 text-[9px] uppercase tracking-[0.12em] ${
+                        player.ready
+                          ? 'border-monster/35 bg-monster/15 text-monster'
+                          : 'border-white/10 bg-black/25 text-white/35'
+                      }`}>
+                        {player.ready ? 'Ready' : 'Idle'}
+                      </span>
                     </div>
                   ))}
                 </div>
@@ -809,11 +924,17 @@ function LobbyScreen({
                 className={`mt-6 inline-flex w-full items-center justify-center gap-3 rounded px-6 py-4 font-pixel text-3xl uppercase leading-none transition ${
                   isPaidRoom && !hasPaidSelectedEntry
                     ? 'bg-yellow-300 text-black hover:bg-yellow-200'
+                    : isReady
+                      ? 'border border-white/20 bg-white/[0.08] text-white hover:bg-white/[0.12]'
                     : 'bg-monster text-black hover:bg-monster-dark'
                 }`}
               >
                 <Gamepad2 size={24} />
-                {isPaidRoom && !hasPaidSelectedEntry ? `Ready Requires ${selectedTier.buyIn}` : `Ready ${wager === 'FREE' ? 'Free' : wager}`}
+                {isPaidRoom && !hasPaidSelectedEntry
+                  ? `Ready Requires ${selectedTier.buyIn}`
+                  : isReady
+                    ? 'Unready'
+                    : `Ready ${wager === 'FREE' ? 'Free' : wager}`}
               </button>
             </aside>
           </main>
@@ -1014,27 +1135,43 @@ export default function App() {
 
   if (status === 'PLAYING') {
     return (
-      <Suspense fallback={<LoadingScreen />}>
-        <GameExperience />
-      </Suspense>
+      <>
+        <Suspense fallback={<LoadingScreen />}>
+          <GameExperience />
+        </Suspense>
+        <MusicControl />
+      </>
     );
   }
 
   if (status === 'RESULT') {
-    return <ResultScreen profile={profile} onConnectWallet={handleConnectWallet} />;
+    return (
+      <>
+        <ResultScreen profile={profile} onConnectWallet={handleConnectWallet} />
+        <MusicControl />
+      </>
+    );
   }
 
   if (menuView === 'START') {
-    return <StartScreen onEnterLobby={handleEnterLobby} profile={profile} onConnectWallet={handleConnectWallet} />;
+    return (
+      <>
+        <StartScreen onEnterLobby={handleEnterLobby} profile={profile} onConnectWallet={handleConnectWallet} />
+        <MusicControl />
+      </>
+    );
   }
 
   return (
-    <LobbyScreen
-      onBack={handleBackToStart}
-      onStartGame={handleStartGame}
-      profile={profile}
-      setProfile={setProfile}
-      onConnectWallet={handleConnectWallet}
-    />
+    <>
+      <LobbyScreen
+        onBack={handleBackToStart}
+        onStartGame={handleStartGame}
+        profile={profile}
+        setProfile={setProfile}
+        onConnectWallet={handleConnectWallet}
+      />
+      <MusicControl />
+    </>
   );
 }

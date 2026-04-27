@@ -57,6 +57,15 @@ export const clutterPlacements: ArenaPlacement[] = [
   { position: [8, 0, -40] },
 ];
 
+export const coverPlacements: ArenaPlacement[] = [
+  { position: [-6, 0, -8], rotationY: 0.35, color: '#5f6b46' },
+  { position: [7, 0, 8], rotationY: -0.45, color: '#6f5740' },
+  { position: [-9, 0, 34], rotationY: -0.95, color: '#435f67' },
+  { position: [10, 0, -34], rotationY: 0.8, color: '#6b4f42' },
+  { position: [0, 0, -56], rotationY: 0.05, color: '#59534a' },
+  { position: [0, 0, 56], rotationY: -0.05, color: '#59534a' },
+];
+
 export const arenaColliders: ArenaCollider[] = [
   ...trailerPlacements.map((placement, index) => ({
     id: `trailer-${index}`,
@@ -74,6 +83,12 @@ export const arenaColliders: ArenaCollider[] = [
     id: `couch-${index}`,
     center: [placement.position[0], 1.25, placement.position[2]] as Vec3,
     halfSize: [2, 1.25, 1] as Vec3,
+    rotationY: placement.rotationY ?? 0,
+  })),
+  ...coverPlacements.map((placement, index) => ({
+    id: `cover-${index}`,
+    center: [placement.position[0], 1.3, placement.position[2]] as Vec3,
+    halfSize: [2.5, 1.3, 1.2] as Vec3,
     rotationY: placement.rotationY ?? 0,
   })),
   {

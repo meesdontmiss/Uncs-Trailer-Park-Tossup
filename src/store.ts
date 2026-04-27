@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { ImpactSnapshot, LobbyRoomSnapshot, MatchResult, PlayerSnapshot, ProjectileSnapshot } from './gameTypes';
+import { KILLS_TO_WIN, MIN_MATCH_PLAYERS, type ImpactSnapshot, type LobbyRoomSnapshot, type MatchResult, type MatchStateSnapshot, type PlayerSnapshot, type ProjectileSnapshot } from './gameTypes';
 
 export interface Can extends ProjectileSnapshot {}
 export interface Impact extends ImpactSnapshot {}
@@ -13,6 +13,7 @@ interface GameState {
   playersInfo: Record<string, PlayerSnapshot>;
   lobbyRooms: LobbyRoomSnapshot[];
   matchResult: MatchResult | null;
+  matchState: MatchStateSnapshot;
   setWager: (wager: string) => void;
   startGame: () => void;
   registerCan: (projectile: Can) => void;
@@ -23,6 +24,7 @@ interface GameState {
   setPlayersInfo: (info: Record<string, PlayerSnapshot>) => void;
   setLobbyRooms: (rooms: LobbyRoomSnapshot[]) => void;
   setMatchResult: (result: MatchResult) => void;
+  setMatchState: (state: MatchStateSnapshot) => void;
   endGame: (result?: MatchResult) => void;
   reset: () => void;
 }
@@ -36,6 +38,14 @@ export const useGameStore = create<GameState>((set) => ({
   playersInfo: {},
   lobbyRooms: [],
   matchResult: null,
+  matchState: {
+    phase: 'warmup',
+    playerCount: 0,
+    minPlayers: MIN_MATCH_PLAYERS,
+    killsToWin: KILLS_TO_WIN,
+    countdownEndsAt: null,
+    message: `Warmup: waiting for ${MIN_MATCH_PLAYERS} players.`,
+  },
   setWager: (wager) => set({ wager }),
   
   startGame: () => set({
@@ -62,6 +72,7 @@ export const useGameStore = create<GameState>((set) => ({
   setPlayersInfo: (info) => set({ playersInfo: info }),
   setLobbyRooms: (rooms) => set({ lobbyRooms: rooms }),
   setMatchResult: (result) => set({ matchResult: result, status: 'RESULT' }),
+  setMatchState: (matchState) => set({ matchState }),
   endGame: (result) => set({
     status: 'RESULT',
     matchResult: result ?? null,
@@ -75,5 +86,13 @@ export const useGameStore = create<GameState>((set) => ({
     throwCharge: 0,
     playersInfo: {},
     matchResult: null,
+    matchState: {
+      phase: 'warmup',
+      playerCount: 0,
+      minPlayers: MIN_MATCH_PLAYERS,
+      killsToWin: KILLS_TO_WIN,
+      countdownEndsAt: null,
+      message: `Warmup: waiting for ${MIN_MATCH_PLAYERS} players.`,
+    },
   }),
 }));

@@ -1,7 +1,7 @@
 import { Suspense, useEffect, useState } from 'react';
 import { Canvas } from '@react-three/fiber';
 import { Physics } from '@react-three/rapier';
-import { Cloud, Clouds, Environment, KeyboardControls, Sky } from '@react-three/drei';
+import { KeyboardControls, Sky } from '@react-three/drei';
 import { Level } from './Level';
 import { Player } from './Player';
 import { CanProjectile } from './CanProjectile';
@@ -10,6 +10,7 @@ import { NetworkPlayer } from './NetworkPlayer';
 import { useGameStore } from '../../store';
 import {
   type ImpactSnapshot,
+  type MatchStateSnapshot,
   type MatchResult,
   type PlayerSnapshot,
   type ProjectileSnapshot,
@@ -30,13 +31,6 @@ interface NetworkPlayerState extends PlayerSnapshot {
   lastShotAt: number | null;
 }
 
-interface MovementUpdate {
-  id: string;
-  position: [number, number, number];
-  yaw: number;
-  pitch: number;
-}
-
 export const keyboardMap = [
   { name: 'forward', keys: ['ArrowUp', 'KeyW'] },
   { name: 'backward', keys: ['ArrowDown', 'KeyS'] },
@@ -54,6 +48,7 @@ export function GameWorld() {
   const addImpact = useGameStore((state) => state.addImpact);
   const setPlayersInfo = useGameStore((state) => state.setPlayersInfo);
   const setMatchResult = useGameStore((state) => state.setMatchResult);
+  const setMatchState = useGameStore((state) => state.setMatchState);
   const [networkPlayers, setNetworkPlayers] = useState<Record<string, NetworkPlayerState>>({});
 
   useEffect(() => {
@@ -102,25 +97,6 @@ export function GameWorld() {
         const next = { ...prev };
         delete next[id];
         return next;
-      });
-    };
-
-    const onPlayerMoved = (movement: MovementUpdate) => {
-      setNetworkPlayers((prev) => {
-        const existing = prev[movement.id];
-        if (!existing) {
-          return prev;
-        }
-
-        return {
-          ...prev,
-          [movement.id]: {
-            ...existing,
-            position: movement.position,
-            yaw: movement.yaw,
-            pitch: movement.pitch,
-          },
-        };
       });
     };
 
@@ -180,10 +156,13 @@ export function GameWorld() {
       setMatchResult(result);
     };
 
+    const onMatchState = (state: MatchStateSnapshot) => {
+      setMatchState(state);
+    };
+
     socket.on('currentPlayers', onCurrentPlayers);
     socket.on('playerJoined', onPlayerJoined);
     socket.on('playerLeft', onPlayerLeft);
-    socket.on('playerMoved', onPlayerMoved);
     socket.on('projectileSpawn', onProjectileSpawn);
     socket.on('projectileDespawned', onProjectileDespawned);
     socket.on('impactCreated', onImpactCreated);
@@ -191,6 +170,7 @@ export function GameWorld() {
     socket.on('playerRespawned', onPlayerRespawned);
     socket.on('scoreUpdate', applySnapshot);
     socket.on('matchEnded', onMatchEnded);
+    socket.on('matchState', onMatchState);
 
     const joinMatch = () => {
       socket.emit('joinMatch');
@@ -207,7 +187,6 @@ export function GameWorld() {
       socket.off('currentPlayers', onCurrentPlayers);
       socket.off('playerJoined', onPlayerJoined);
       socket.off('playerLeft', onPlayerLeft);
-      socket.off('playerMoved', onPlayerMoved);
       socket.off('projectileSpawn', onProjectileSpawn);
       socket.off('projectileDespawned', onProjectileDespawned);
       socket.off('impactCreated', onImpactCreated);
@@ -215,15 +194,16 @@ export function GameWorld() {
       socket.off('playerRespawned', onPlayerRespawned);
       socket.off('scoreUpdate', applySnapshot);
       socket.off('matchEnded', onMatchEnded);
+      socket.off('matchState', onMatchState);
     };
-  }, [addImpact, registerCan, removeCan, setMatchResult, setPlayersInfo]);
+  }, [addImpact, registerCan, removeCan, setMatchResult, setMatchState, setPlayersInfo]);
 
   return (
     <KeyboardControls map={keyboardMap}>
       <Canvas
-        shadows
-        camera={{ fov: 75 }}
-        gl={{ alpha: false, antialias: true }}
+        dpr={1}
+        camera={{ fov: 75, near: 0.1, far: 185 }}
+        gl={{ alpha: false, antialias: false, depth: true, stencil: false, powerPreference: 'high-performance' }}
         onCreated={({ gl }) => {
           gl.setClearColor('#9dc8e6', 1);
         }}
@@ -238,50 +218,12 @@ export function GameWorld() {
           mieCoefficient={0.006}
           mieDirectionalG={0.72}
         />
-        <Suspense fallback={null}>
-          <Environment preset="park" environmentIntensity={0.72} />
-          <Clouds limit={60} range={220}>
-            <Cloud
-              seed={14}
-              position={[-90, 92, -170]}
-              bounds={[36, 7, 12]}
-              scale={[2.6, 0.8, 1.1]}
-              volume={8}
-              opacity={0.18}
-              color="#f7fbff"
-            />
-            <Cloud
-              seed={27}
-              position={[88, 104, -140]}
-              bounds={[40, 8, 14]}
-              scale={[2.9, 0.85, 1.15]}
-              volume={10}
-              opacity={0.16}
-              color="#edf6ff"
-            />
-            <Cloud
-              seed={41}
-              position={[12, 112, 150]}
-              bounds={[50, 7, 16]}
-              scale={[3.2, 0.75, 1.25]}
-              volume={10}
-              opacity={0.14}
-              color="#f4f8fa"
-            />
-          </Clouds>
-        </Suspense>
         <hemisphereLight args={['#d9ecff', '#52694a', 0.82]} />
-        <ambientLight intensity={0.24} />
+        <ambientLight intensity={0.38} />
         <directionalLight
-          castShadow
           position={[-32, 42, -28]}
           color="#fff4d4"
-          intensity={1.65}
-          shadow-mapSize={[2048, 2048]}
-          shadow-camera-left={-50}
-          shadow-camera-right={50}
-          shadow-camera-top={50}
-          shadow-camera-bottom={-50}
+          intensity={1.48}
         />
 
         <Suspense fallback={null}>

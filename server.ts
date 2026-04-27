@@ -7,13 +7,20 @@ import { arenaColliders, arenaSpawnPoints } from './src/arena';
 import {
   GRAVITY_Y,
   HOUSE_FEE_RATE,
+  KILLS_TO_WIN,
+  MATCH_START_COUNTDOWN_MS,
+  MAX_THROW_POWER,
   MAX_CAN_DAMAGE,
   MAX_HEALTH,
   MIN_CAN_DAMAGE,
+  MIN_MATCH_PLAYERS,
+  MIN_THROW_POWER,
   PLAYER_HIT_RADIUS,
+  RESPAWN_DELAY_MS,
   PROJECTILE_TTL_MS,
   SHOOT_COOLDOWN_MS,
   type LobbyRoomSnapshot,
+  type MatchStateSnapshot,
   type MatchResult,
   type PlayerSnapshot,
   type ProjectileSnapshot,
@@ -48,6 +55,8 @@ interface LobbyProfile extends PersistedProfile {}
 
 interface ServerPlayer extends PlayerSnapshot {
   lastShotAt: number;
+  lastStateAt: number;
+  lastPersistAt: number;
 }
 
 interface ServerProjectile extends ProjectileSnapshot {
@@ -58,14 +67,45 @@ interface ServerProjectile extends ProjectileSnapshot {
 const isProductionRuntime = process.env.NODE_ENV === 'production' || process.env.npm_lifecycle_event === 'start';
 const PORT = Number(process.env.PORT ?? (isProductionRuntime ? 3000 : 3001));
 const PROJECTILE_SIM_STEP_MS = 25;
+const MAX_POSITION_Y = 35;
+const MIN_POSITION_Y = -4;
+const MAX_VALIDATED_MOVE_SPEED = 24;
+const MAX_VALIDATED_MOVE_SLACK = 6;
+const PLAYER_EYE_HEIGHT = 1.4;
+const PROJECTILE_RIGHT_OFFSET = 0.8;
+const PROJECTILE_FORWARD_OFFSET = 1.5;
+const MOVE_PERSIST_INTERVAL_MS = 3000;
 const players: Record<string, ServerPlayer> = {};
 const projectiles = new Map<string, ServerProjectile>();
-const lobbySelections = new Map<string, { wager: string; joinedAt: number }>();
+const lobbySelections = new Map<string, { wager: string; joinedAt: number; ready: boolean }>();
 const lobbyProfiles = new Map<string, LobbyProfile>();
 const entryPayments = new Map<string, EntryPaymentReceipt>();
+const readyCountdowns = new Map<string, { endsAt: number; timeout: ReturnType<typeof setTimeout> }>();
 let matchResult: MatchResult | null = null;
 let activeMatchId: string | null = null;
 let activeMatchCreatePromise: Promise<string | null> | null = null;
+
+function getMatchState(): MatchStateSnapshot {
+  const playerCount = Object.keys(players).length;
+  const phase = matchResult ? 'finished' : activeMatchId ? 'live' : 'warmup';
+
+  return {
+    phase,
+    playerCount,
+    minPlayers: MIN_MATCH_PLAYERS,
+    killsToWin: KILLS_TO_WIN,
+    countdownEndsAt: null,
+    message: phase === 'live'
+      ? `First to ${KILLS_TO_WIN} kills wins.`
+      : playerCount < MIN_MATCH_PLAYERS
+        ? `Warmup: waiting for ${MIN_MATCH_PLAYERS - playerCount} more player.`
+        : 'Match ready.',
+  };
+}
+
+function emitMatchState(io: Server) {
+  io.emit('matchState', getMatchState());
+}
 
 function defaultProfileForSocket(socketId: string): LobbyProfile {
   return {
@@ -179,6 +219,7 @@ function snapshotPlayers(): Record<string, PlayerSnapshot> {
         health: player.health,
         alive: player.alive,
         respawnAt: player.respawnAt,
+        invulnerableUntil: player.invulnerableUntil,
       },
     ]),
   );
@@ -191,8 +232,11 @@ function snapshotLobbyRooms(): LobbyRoomSnapshot[] {
     const room = rooms.get(selection.wager) ?? {
       wager: selection.wager,
       players: [],
+      readyCount: 0,
+      countdownEndsAt: readyCountdowns.get(selection.wager)?.endsAt ?? null,
     };
     const profile = lobbyProfiles.get(id);
+    const ready = selection.ready;
     room.players.push({
       id,
       joinedAt: selection.joinedAt,
@@ -200,7 +244,11 @@ function snapshotLobbyRooms(): LobbyRoomSnapshot[] {
       username: profile?.username ?? `Player_${id.slice(0, 4)}`,
       pfp: profile?.pfp ?? '🥫',
       entryPaid: selection.wager === 'FREE' || entryPayments.get(id)?.wager === selection.wager,
+      ready,
     });
+    if (ready) {
+      room.readyCount += 1;
+    }
     rooms.set(selection.wager, room);
   }
 
@@ -221,6 +269,65 @@ function emitLobbyRooms(io: Server) {
   }
 
   io.emit('lobbyRooms', snapshotLobbyRooms());
+}
+
+function roomPlayers(wager: string) {
+  return [...lobbySelections.entries()]
+    .filter(([, selection]) => selection.wager === wager)
+    .map(([id, selection]) => ({ id, selection }));
+}
+
+function cancelReadyCountdown(io: Server, wager: string) {
+  const countdown = readyCountdowns.get(wager);
+  if (!countdown) {
+    return;
+  }
+
+  clearTimeout(countdown.timeout);
+  readyCountdowns.delete(wager);
+  emitLobbyRooms(io);
+}
+
+function evaluateReadyCountdown(io: Server, wager: string) {
+  if (activeMatchId || matchResult) {
+    cancelReadyCountdown(io, wager);
+    return;
+  }
+
+  const entries = roomPlayers(wager);
+  const readyEntries = entries.filter(({ selection }) => selection.ready);
+  const allReady = entries.length >= MIN_MATCH_PLAYERS && readyEntries.length === entries.length;
+
+  if (!allReady) {
+    cancelReadyCountdown(io, wager);
+    return;
+  }
+
+  if (readyCountdowns.has(wager)) {
+    emitLobbyRooms(io);
+    return;
+  }
+
+  const endsAt = Date.now() + MATCH_START_COUNTDOWN_MS;
+  const timeout = setTimeout(() => {
+    readyCountdowns.delete(wager);
+    const startingEntries = roomPlayers(wager)
+      .filter(({ selection }) => selection.ready)
+      .map(({ id }) => id);
+
+    if (startingEntries.length < MIN_MATCH_PLAYERS || activeMatchId || matchResult) {
+      emitLobbyRooms(io);
+      return;
+    }
+
+    for (const id of startingEntries) {
+      io.to(id).emit('matchStarting', { wager });
+    }
+    emitLobbyRooms(io);
+  }, MATCH_START_COUNTDOWN_MS);
+
+  readyCountdowns.set(wager, { endsAt, timeout });
+  emitLobbyRooms(io);
 }
 
 function snapshotProjectile(projectile: ServerProjectile): ProjectileSnapshot {
@@ -362,6 +469,7 @@ function lerpVec3(start: Vec3, end: Vec3, t: number): Vec3 {
 }
 
 function createPlayer(id: string): ServerPlayer {
+  const now = Date.now();
   return {
     id,
     position: chooseSpawnPoint(id),
@@ -372,8 +480,127 @@ function createPlayer(id: string): ServerPlayer {
     health: MAX_HEALTH,
     alive: true,
     respawnAt: null,
+    invulnerableUntil: null,
     lastShotAt: 0,
+    lastStateAt: now,
+    lastPersistAt: 0,
   };
+}
+
+function isFiniteVec3(value: unknown): value is Vec3 {
+  return Array.isArray(value)
+    && value.length === 3
+    && value.every((entry) => typeof entry === 'number' && Number.isFinite(entry));
+}
+
+function isWithinArena(position: Vec3) {
+  return Math.abs(position[0]) <= 74
+    && Math.abs(position[2]) <= 74
+    && position[1] >= MIN_POSITION_Y
+    && position[1] <= MAX_POSITION_Y;
+}
+
+function horizontalDistance(a: Vec3, b: Vec3) {
+  return Math.hypot(a[0] - b[0], a[2] - b[2]);
+}
+
+function validatePlayerPosition(player: ServerPlayer, position: unknown, now: number) {
+  if (!isFiniteVec3(position) || !isWithinArena(position)) {
+    return null;
+  }
+
+  const elapsedSeconds = Math.max(0.016, (now - player.lastStateAt) / 1000);
+  const maxDistance = (MAX_VALIDATED_MOVE_SPEED * elapsedSeconds) + MAX_VALIDATED_MOVE_SLACK;
+  if (horizontalDistance(player.position, position) > maxDistance) {
+    return null;
+  }
+
+  return position;
+}
+
+function sanitizeAngle(value: unknown, fallback: number, min = -Number.POSITIVE_INFINITY, max = Number.POSITIVE_INFINITY) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return fallback;
+  }
+
+  return Math.max(min, Math.min(max, value));
+}
+
+function computeThrowVector(yaw: number, pitch: number) {
+  const clampedPitch = Math.max(-Math.PI / 2.5, Math.min(Math.PI / 2.5, pitch));
+  const cosPitch = Math.cos(clampedPitch);
+  return [
+    -Math.sin(yaw) * cosPitch,
+    Math.sin(clampedPitch),
+    -Math.cos(yaw) * cosPitch,
+  ] as Vec3;
+}
+
+function buildServerProjectile(player: ServerPlayer, chargePower: number, now: number): ServerProjectile {
+  const clampedCharge = Math.max(0, Math.min(1, chargePower));
+  const throwPower = MIN_THROW_POWER + ((MAX_THROW_POWER - MIN_THROW_POWER) * clampedCharge);
+  const forward = computeThrowVector(player.yaw, player.pitch);
+  const right: Vec3 = [Math.cos(player.yaw), 0, -Math.sin(player.yaw)];
+  const spawnPos: Vec3 = [
+    player.position[0] + (right[0] * PROJECTILE_RIGHT_OFFSET) + (forward[0] * PROJECTILE_FORWARD_OFFSET),
+    player.position[1] + PLAYER_EYE_HEIGHT + (forward[1] * PROJECTILE_FORWARD_OFFSET),
+    player.position[2] + (right[2] * PROJECTILE_RIGHT_OFFSET) + (forward[2] * PROJECTILE_FORWARD_OFFSET),
+  ];
+  const velocity: Vec3 = [
+    forward[0] * throwPower,
+    forward[1] * throwPower,
+    forward[2] * throwPower,
+  ];
+
+  return {
+    id: randomUUID(),
+    ownerId: player.id,
+    spawnPos,
+    velocity,
+    chargePower: clampedCharge,
+    spawnedAt: now,
+    resolved: false,
+    lastSimulatedAt: now,
+  };
+}
+
+function respawnPlayer(io: Server, player: ServerPlayer) {
+  const spawn = chooseSpawnPoint(player.id);
+  player.position = spawn;
+  player.health = MAX_HEALTH;
+  player.alive = true;
+  player.respawnAt = null;
+  player.invulnerableUntil = Date.now() + 1200;
+  player.lastStateAt = Date.now();
+  persist(updatePlayerStats(activeMatchId, player));
+  io.emit('playerRespawned', { id: player.id, position: player.position });
+  emitPlayers(io);
+}
+
+async function maybeStartLiveMatch(io: Server, wager: string, buyInUnc: number) {
+  if (activeMatchId || matchResult || Object.keys(players).length < MIN_MATCH_PLAYERS) {
+    emitMatchState(io);
+    return;
+  }
+
+  for (const player of Object.values(players)) {
+    player.kills = 0;
+    player.deaths = 0;
+    player.health = MAX_HEALTH;
+    player.alive = true;
+    player.respawnAt = null;
+    player.invulnerableUntil = Date.now() + 1500;
+    player.position = chooseSpawnPoint(player.id);
+    player.lastStateAt = Date.now();
+  }
+
+  await ensureActiveMatch(wager, buyInUnc);
+  clearProjectiles(io);
+  emitPlayers(io);
+  emitMatchState(io);
+  for (const player of Object.values(players)) {
+    io.emit('playerRespawned', { id: player.id, position: player.position });
+  }
 }
 
 function despawnProjectile(io: Server, projectileId: string) {
@@ -399,6 +626,13 @@ function resetArena(io: Server) {
   matchResult = null;
   activeMatchId = null;
   activeMatchCreatePromise = null;
+  for (const countdown of readyCountdowns.values()) {
+    clearTimeout(countdown.timeout);
+  }
+  readyCountdowns.clear();
+  for (const selection of lobbySelections.values()) {
+    selection.ready = false;
+  }
   clearProjectiles(io);
 }
 
@@ -425,6 +659,7 @@ function finishMatch(io: Server, result: MatchResult) {
   clearProjectiles(io);
   io.emit('matchEnded', result);
   emitPlayers(io);
+  emitMatchState(io);
 }
 
 function chooseSecondPlaceBonusId(winnerId: string | null) {
@@ -437,24 +672,23 @@ function chooseSecondPlaceBonusId(winnerId: string | null) {
     ))[0]?.id ?? null;
 }
 
-function maybeFinishLastStanding(io: Server) {
-  const alivePlayers = Object.values(players).filter((player) => player.alive);
-  const totalPlayers = Object.keys(players).length;
-
-  if (matchResult || totalPlayers < 2 || alivePlayers.length !== 1) {
+function maybeFinishKillLimit(io: Server, player: ServerPlayer) {
+  if (matchResult || !activeMatchId || player.kills < KILLS_TO_WIN) {
     return false;
   }
 
-  const winnerId = alivePlayers[0].id;
+  const winnerId = player.id;
   finishMatch(io, buildMatchResult(winnerId, 'lastStanding'));
+  emitMatchState(io);
   return true;
 }
 
 function handleValidHit(io: Server, ownerId: string, targetId: string, impactPosition: Vec3, chargePower: number) {
   const owner = players[ownerId];
   const target = players[targetId];
+  const now = Date.now();
 
-  if (!owner || !target || !target.alive) {
+  if (!owner || !target || !target.alive || !activeMatchId || (target.invulnerableUntil ?? 0) > now) {
     return;
   }
 
@@ -486,7 +720,8 @@ function handleValidHit(io: Server, ownerId: string, targetId: string, impactPos
   target.deaths += 1;
   target.alive = false;
   target.health = 0;
-  target.respawnAt = null;
+  target.respawnAt = Date.now() + RESPAWN_DELAY_MS;
+  target.invulnerableUntil = null;
 
   io.emit('playerKilled', { targetId, killerId: ownerId });
   persist(updatePlayerStats(activeMatchId, owner));
@@ -499,7 +734,7 @@ function handleValidHit(io: Server, ownerId: string, targetId: string, impactPos
     eventActor(targetId),
   ));
 
-  if (maybeFinishLastStanding(io)) {
+  if (maybeFinishKillLimit(io, owner)) {
     return;
   }
 
@@ -623,6 +858,12 @@ async function startServer() {
   const cleanupInterval = setInterval(() => {
     const now = Date.now();
 
+    for (const player of Object.values(players)) {
+      if (!player.alive && player.respawnAt && player.respawnAt <= now && activeMatchId && !matchResult) {
+        respawnPlayer(io, player);
+      }
+    }
+
     for (const [projectileId, projectile] of projectiles.entries()) {
       if (projectile.resolved) {
         despawnProjectile(io, projectileId);
@@ -665,6 +906,7 @@ async function startServer() {
       ...getPaymentConfig(),
       hotWalletTokenAccount: getHotWalletTokenAccount(),
     });
+    socket.emit('matchState', getMatchState());
     persist(recordEvent(activeMatchId, 'socketConnected', { socketId: socket.id }, eventActor(socket.id)));
 
     socket.on('getPaymentConfig', (callback?: (config: ReturnType<typeof getPaymentConfig> & { hotWalletTokenAccount: string | null }) => void) => {
@@ -675,12 +917,18 @@ async function startServer() {
     });
 
     socket.on('selectLobby', (wager: string) => {
+      const previousWager = lobbySelections.get(socket.id)?.wager;
       lobbySelections.set(socket.id, {
         wager,
         joinedAt: lobbySelections.get(socket.id)?.joinedAt ?? Date.now(),
+        ready: false,
       });
       persist(recordEvent(activeMatchId, 'lobbySelected', { wager }, eventActor(socket.id)));
       emitLobbyRooms(io);
+      if (previousWager && previousWager !== wager) {
+        evaluateReadyCountdown(io, previousWager);
+      }
+      evaluateReadyCountdown(io, wager);
     });
 
     socket.on('verifyEntryPayment', async (
@@ -725,6 +973,21 @@ async function startServer() {
       callback?.(result);
     });
 
+    socket.on('setReady', (ready: boolean) => {
+      const selection = lobbySelections.get(socket.id);
+      if (!selection) {
+        return;
+      }
+
+      const buyInUnc = parseBuyInUnc(selection.wager);
+      const paidOrFree = buyInUnc <= 0 || entryPayments.get(socket.id)?.wager === selection.wager;
+      const hasRequiredWallet = buyInUnc <= 0 || Boolean(getProfile(socket.id).walletAddress);
+      selection.ready = Boolean(ready && paidOrFree && hasRequiredWallet);
+      persist(recordEvent(activeMatchId, selection.ready ? 'playerReadied' : 'playerUnreadied', { wager: selection.wager }, eventActor(socket.id)));
+      emitLobbyRooms(io);
+      evaluateReadyCountdown(io, selection.wager);
+    });
+
     socket.on('saveProfile', async (profile: Partial<LobbyProfile>) => {
       const username = typeof profile.username === 'string'
         ? profile.username.trim().slice(0, 18)
@@ -754,7 +1017,7 @@ async function startServer() {
 
     socket.on('joinMatch', async () => {
       if (!lobbySelections.has(socket.id)) {
-        lobbySelections.set(socket.id, { wager: 'FREE', joinedAt: Date.now() });
+        lobbySelections.set(socket.id, { wager: 'FREE', joinedAt: Date.now(), ready: true });
         emitLobbyRooms(io);
       }
 
@@ -787,23 +1050,27 @@ async function startServer() {
       }
 
       const player = players[socket.id];
-      await ensureActiveMatch(wager, buyInUnc);
-      persist(upsertMatchPlayer(activeMatchId, {
-        socketId: socket.id,
-        profile: getProfile(socket.id),
-        player,
-      }));
+      await maybeStartLiveMatch(io, wager, buyInUnc);
+      if (activeMatchId) {
+        persist(upsertMatchPlayer(activeMatchId, {
+          socketId: socket.id,
+          profile: getProfile(socket.id),
+          player,
+        }));
+      }
       persist(recordEvent(activeMatchId, 'playerJoined', { position: player.position, wager }, eventActor(socket.id)));
 
       socket.emit('currentPlayers', snapshotPlayers());
       socket.emit('scoreUpdate', snapshotPlayers());
       socket.emit('spawnAssigned', { id: player.id, position: player.position });
+      socket.emit('matchState', getMatchState());
       if (matchResult) {
         socket.emit('matchEnded', matchResult);
       }
 
       socket.broadcast.emit('playerJoined', snapshotPlayers()[socket.id]);
       emitPlayers(io);
+      emitMatchState(io);
     });
 
     socket.on('updateState', (state: Partial<Pick<PlayerSnapshot, 'position' | 'yaw' | 'pitch'>>) => {
@@ -812,18 +1079,23 @@ async function startServer() {
         return;
       }
 
+      const now = Date.now();
       if (state.position) {
-        player.position = state.position;
+        const validatedPosition = validatePlayerPosition(player, state.position, now);
+        if (!validatedPosition) {
+          socket.emit('serverCorrection', { position: player.position });
+          return;
+        }
+        player.position = validatedPosition;
       }
 
-      if (typeof state.yaw === 'number') {
-        player.yaw = state.yaw;
+      player.yaw = sanitizeAngle(state.yaw, player.yaw);
+      player.pitch = sanitizeAngle(state.pitch, player.pitch, -Math.PI / 2.5, Math.PI / 2.5);
+      player.lastStateAt = now;
+      if (activeMatchId && now - player.lastPersistAt > MOVE_PERSIST_INTERVAL_MS) {
+        player.lastPersistAt = now;
+        persist(updatePlayerStats(activeMatchId, player));
       }
-
-      if (typeof state.pitch === 'number') {
-        player.pitch = state.pitch;
-      }
-      persist(updatePlayerStats(activeMatchId, player));
 
       socket.broadcast.emit('playerMoved', {
         id: player.id,
@@ -845,17 +1117,7 @@ async function startServer() {
       }
 
       player.lastShotAt = now;
-
-      const projectile: ServerProjectile = {
-        id: randomUUID(),
-        ownerId: socket.id,
-        spawnPos: data.spawnPos,
-        velocity: data.velocity,
-        chargePower: Math.max(0, Math.min(1, data.chargePower ?? 0)),
-        spawnedAt: now,
-        resolved: false,
-        lastSimulatedAt: now,
-      };
+      const projectile = buildServerProjectile(player, data.chargePower ?? 0, now);
 
       projectiles.set(projectile.id, projectile);
       persist(recordProjectile(activeMatchId, snapshotProjectile(projectile), getProfile(socket.id)));
@@ -879,7 +1141,7 @@ async function startServer() {
       }
 
       const projectedRemainingPlayers = Object.values(players).filter((player) => player.id !== socket.id);
-      const shouldFinishForfeit = !matchResult && projectedRemainingPlayers.length === 1 && Object.keys(players).length >= 2;
+      const shouldFinishForfeit = Boolean(activeMatchId) && !matchResult && projectedRemainingPlayers.length === 1 && Object.keys(players).length >= 2;
       await markPlayerLeft(activeMatchId, socket.id);
       await recordEvent(activeMatchId, 'playerDisconnected', { socketId: socket.id }, leavingActor);
 
@@ -887,6 +1149,7 @@ async function startServer() {
         finishMatch(io, buildMatchResult(projectedRemainingPlayers[0].id, 'forfeit'));
       }
 
+      const previousSelection = lobbySelections.get(socket.id);
       delete players[socket.id];
       lobbySelections.delete(socket.id);
       lobbyProfiles.delete(socket.id);
@@ -901,6 +1164,10 @@ async function startServer() {
 
       io.emit('playerLeft', socket.id);
       emitLobbyRooms(io);
+      if (previousSelection) {
+        evaluateReadyCountdown(io, previousSelection.wager);
+      }
+      emitMatchState(io);
 
       const remainingPlayers = Object.values(players);
       if (remainingPlayers.length === 0) {
@@ -908,6 +1175,7 @@ async function startServer() {
           await abandonMatchRecord(activeMatchId);
         }
         resetArena(io);
+        emitMatchState(io);
       } else {
         emitPlayers(io);
       }

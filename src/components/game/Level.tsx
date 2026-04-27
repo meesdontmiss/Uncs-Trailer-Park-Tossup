@@ -4,7 +4,7 @@ import { Billboard, useTexture } from '@react-three/drei';
 import { useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
 import { assets } from './assets';
-import { carPlacements, clutterPlacements, couchPlacements, trailerPlacements } from '../../arena';
+import { carPlacements, clutterPlacements, couchPlacements, coverPlacements, trailerPlacements } from '../../arena';
 
 // --------------------------------------------------------
 // Custom Map Props (Composed 3D Shapes)
@@ -277,6 +277,37 @@ function Couch3D({
       <mesh castShadow receiveShadow position={[0, 1.5, -0.75]}>
         <boxGeometry args={[4, 1.5, 0.5]} />
         <meshStandardMaterial color="#58633c" roughness={0.9} />
+      </mesh>
+    </RigidBody>
+  );
+}
+
+function CoverStack3D({
+  position,
+  rotation = [0, 0, 0],
+  color = '#5f6b46',
+}: {
+  position: [number, number, number];
+  rotation?: [number, number, number];
+  color?: string;
+}) {
+  return (
+    <RigidBody type="fixed" colliders="cuboid" position={position} rotation={rotation}>
+      <mesh castShadow receiveShadow position={[0, 0.65, 0]}>
+        <boxGeometry args={[5, 1.3, 2.4]} />
+        <meshStandardMaterial color={color} roughness={0.95} />
+      </mesh>
+      <mesh castShadow receiveShadow position={[-1.15, 1.65, 0.18]} rotation={[Math.PI / 2, 0.25, 0]}>
+        <cylinderGeometry args={[0.62, 0.62, 1.1, 16]} />
+        <meshStandardMaterial color="#1d1d1b" roughness={0.78} />
+      </mesh>
+      <mesh castShadow receiveShadow position={[0.1, 1.64, -0.12]} rotation={[Math.PI / 2, -0.18, 0]}>
+        <cylinderGeometry args={[0.62, 0.62, 1.1, 16]} />
+        <meshStandardMaterial color="#24241f" roughness={0.78} />
+      </mesh>
+      <mesh castShadow receiveShadow position={[1.35, 1.65, 0.15]} rotation={[Math.PI / 2, 0.35, 0]}>
+        <cylinderGeometry args={[0.62, 0.62, 1.1, 16]} />
+        <meshStandardMaterial color="#191917" roughness={0.78} />
       </mesh>
     </RigidBody>
   );
@@ -578,6 +609,15 @@ export function Level() {
       {carPlacements.map((placement, index) => (
         <Car3D
           key={`car-${index}`}
+          position={placement.position}
+          rotation={[0, placement.rotationY ?? 0, 0]}
+          color={placement.color}
+        />
+      ))}
+
+      {coverPlacements.map((placement, index) => (
+        <CoverStack3D
+          key={`cover-${index}`}
           position={placement.position}
           rotation={[0, placement.rotationY ?? 0, 0]}
           color={placement.color}

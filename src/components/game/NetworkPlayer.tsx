@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
 import { Billboard } from '@react-three/drei';
 import { RigidBody, RapierRigidBody } from '@react-three/rapier';
 import * as THREE from 'three';
-import { assets } from './assets';
 import { socket } from '../../lib/socket';
 import type { PlayerSnapshot } from '../../gameTypes';
+import { useShootTexture, useUncSpriteTextures } from './useGameTextures';
 
 interface NetworkPlayerState extends PlayerSnapshot {
   lastShotAt: number | null;
@@ -24,20 +24,14 @@ export function NetworkPlayer({ id, initialData }: { id: string; initialData: Ne
   const isShootingRef = useRef(false);
   const shootTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const textures = useMemo(() => {
-    const loader = new THREE.TextureLoader();
-    return assets.sprites.unc.map((path) => {
-      const texture = loader.load(path);
-      texture.magFilter = THREE.NearestFilter;
-      return texture;
-    });
-  }, []);
+  const textures = useUncSpriteTextures();
+  const shootTexture = useShootTexture();
 
-  const shootTexture = useMemo(() => {
-    const texture = new THREE.TextureLoader().load(assets.sprites.UNC_SHOOT_BACK);
-    texture.magFilter = THREE.NearestFilter;
-    return texture;
-  }, []);
+  useEffect(() => {
+    targetPosition.current.set(initialData.position[0], initialData.position[1], initialData.position[2]);
+    yawRef.current = initialData.yaw;
+    setIsDead(!initialData.alive);
+  }, [initialData.alive, initialData.position, initialData.yaw]);
 
   useEffect(() => {
     const onMove = (data: { id: string; position: [number, number, number]; yaw: number }) => {
@@ -116,6 +110,10 @@ export function NetworkPlayer({ id, initialData }: { id: string; initialData: Ne
     if (materialRef.current && materialRef.current.map !== activeTexture) {
       materialRef.current.map = activeTexture;
       materialRef.current.needsUpdate = true;
+    }
+    if (materialRef.current) {
+      const invulnerable = (initialData.invulnerableUntil ?? 0) > Date.now();
+      materialRef.current.opacity = invulnerable ? 0.55 + (Math.sin(Date.now() * 0.02) * 0.25) : 1;
     }
 
     if (isDead) {
